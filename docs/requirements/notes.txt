@@ -1,0 +1,6 @@
+- analiza poszeczeólnych bibliotek czy są kompatybilne a pozostałymi
+- w skryptach są błędy specjalnie więc nie kopiować z nich 1:1, tylko do kontekstu
+- każdy element w innym kontenerze
+- dane nie mogą być produkowane zbyt często żeby nie zadławić systemu
+- stworzyć kilku agentów podczas tworzenia systemu
+- najpierw stawiamy business system, potem kafke/db, a potem debesium, potem spark, potem mini

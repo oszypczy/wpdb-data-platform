@@ -1,0 +1,27 @@
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Secrets (copy .env.example to .env)
+.env
+
+# Datasets are downloaded with `make data`
+data/olist/*.csv
+
+# Local outputs
+spark-output/
+*.log
+
+# Download marker for `make data`
+data/olist/.downloaded
+
+# Course tutorials: kept locally only, not published
+docs/tutorials/
