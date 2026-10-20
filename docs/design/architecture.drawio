@@ -1,33 +1,87 @@
-<mxfile host="drawio" modified="2026-10-20" agent="claude-code" version="31.7.0">
+<mxfile host="Electron" agent="claude-code">
   <diagram id="c4-container" name="C4 – kontenery">
-    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+    <mxGraphModel dx="2007" dy="1292" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
       <root>
-        <mxCell id="0"/>
-        <mxCell id="1" parent="0"/>
-        <mxCell id="bnd" value="Mini Data Platform — Docker Compose „wpdb” (jedna sieć, każdy komponent w osobnym kontenerze)" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=none;strokeColor=#444444;align=left;verticalAlign=top;fontStyle=1;fontSize=13;spacingLeft=10;spacingTop=4;" vertex="1" parent="1"><mxGeometry x="240" y="40" width="1620" height="790" as="geometry"/></mxCell>
-        <mxCell id="csv" value="&lt;b&gt;Olist Brazilian E-Commerce&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Pliki CSV, data/olist/]&lt;/i&gt;&lt;br&gt;&lt;br&gt;9 plików, ~100 tys. zamówień; poza repozytorium (make data)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#999999;strokeColor=#6B6B6B;fontColor=#FFFFFF;align=center;verticalAlign=middle;spacing=6;" vertex="1" parent="1"><mxGeometry x="30" y="320" width="170" height="120" as="geometry"/></mxCell>
-        <mxCell id="user" value="&lt;b&gt;Użytkownik&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Osoba]&lt;/i&gt;&lt;br&gt;&lt;br&gt;analityk / prowadzący, przeglądarka" style="shape=mxgraph.c4.person2;whiteSpace=wrap;html=1;fillColor=#08427B;strokeColor=#073B6F;fontColor=#FFFFFF;align=center;spacing=6;" vertex="1" parent="1"><mxGeometry x="30" y="560" width="170" height="120" as="geometry"/></mxCell>
-        <mxCell id="sim" value="&lt;b&gt;Business Simulator&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: Python 3.12, psycopg]&lt;/i&gt;&lt;br&gt;&lt;br&gt;odtwarza cykl życia zamówień w przyspieszonym czasie: INSERT → UPDATE → DELETE; limit tempa, wznawianie" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;verticalAlign=middle;spacing=6;" vertex="1" parent="1"><mxGeometry x="280" y="320" width="200" height="120" as="geometry"/></mxCell>
-        <mxCell id="pg" value="&lt;b&gt;PostgreSQL&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: PostgreSQL 16, wal_level=logical]&lt;/i&gt;&lt;br&gt;&lt;br&gt;schematy shop (CDC) i sim (stan, widoki prawdy); publikacja dbz_publication; role per usługa" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;spacing=6;" vertex="1" parent="1"><mxGeometry x="610" y="310" width="200" height="140" as="geometry"/></mxCell>
-        <mxCell id="cn" value="&lt;b&gt;Kafka Connect + Debezium&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: Debezium 3.6, konwerter AVRO]&lt;/i&gt;&lt;br&gt;&lt;br&gt;konektor olist-postgres: snapshot + strumień, pełna koperta before/after, klucz = PK" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;verticalAlign=middle;spacing=6;" vertex="1" parent="1"><mxGeometry x="940" y="320" width="200" height="120" as="geometry"/></mxCell>
-        <mxCell id="kf" value="&lt;b&gt;Kafka&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: Kafka 4.3, KRaft single node]&lt;/i&gt;&lt;br&gt;&lt;br&gt;1 temat na tabelę (olist.shop.*), kompaktowane lustra, kolejność per wiersz" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;spacing=6;" vertex="1" parent="1"><mxGeometry x="1270" y="310" width="200" height="140" as="geometry"/></mxCell>
-        <mxCell id="sr" value="&lt;b&gt;Schema Registry&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: Confluent SR 8.3]&lt;/i&gt;&lt;br&gt;&lt;br&gt;schematy AVRO klucza i wartości, zgodność BACKWARD" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;verticalAlign=middle;spacing=6;" vertex="1" parent="1"><mxGeometry x="1105" y="90" width="200" height="100" as="geometry"/></mxCell>
-        <mxCell id="sp" value="&lt;b&gt;Spark&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: Spark 3.5 local[*], Structured Streaming]&lt;/i&gt;&lt;br&gt;&lt;br&gt;dekodowanie AVRO → bronze (append) → silver (MERGE) → gold (gwiazda, okna); kwarantanna" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;verticalAlign=middle;spacing=6;" vertex="1" parent="1"><mxGeometry x="1600" y="320" width="200" height="120" as="geometry"/></mxCell>
-        <mxCell id="mn" value="&lt;b&gt;MinIO + Delta Lake&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: MinIO (S3), Delta]&lt;/i&gt;&lt;br&gt;&lt;br&gt;kubełki bronze / silver / gold / ops / checkpoints; konta per usługa" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;spacing=6;" vertex="1" parent="1"><mxGeometry x="1600" y="550" width="200" height="140" as="geometry"/></mxCell>
-        <mxCell id="ds" value="&lt;b&gt;Dashboard&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: Streamlit, delta-rs / DuckDB]&lt;/i&gt;&lt;br&gt;&lt;br&gt;KPI, lejek, logistyka, mapa, zdrowie potoku, podróż w czasie" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;verticalAlign=middle;spacing=6;" vertex="1" parent="1"><mxGeometry x="610" y="560" width="200" height="120" as="geometry"/></mxCell>
-        <mxCell id="cs" value="&lt;b&gt;Consumer (narzędzie)&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: Python, confluent-kafka]&lt;/i&gt;&lt;br&gt;&lt;br&gt;dekoduje zdarzenia CDC z rejestru, reguły walidacji, śledzenie zamówienia" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;verticalAlign=middle;spacing=6;" vertex="1" parent="1"><mxGeometry x="1270" y="560" width="200" height="120" as="geometry"/></mxCell>
-        <mxCell id="note" value="Kontenery startowe (jednorazowe, idempotentne): kafka-init → tematy wewnętrzne; connect-init → rejestracja konektora (PUT); minio-init → kubełki, polityki, konta. Start sterowany healthcheckami (depends_on: service_healthy). Testy: pytest (jednostkowe / integracyjne / e2e z awariami), uzgadnianie Postgres ↔ Delta." style="shape=note;whiteSpace=wrap;html=1;size=14;fillColor=#FFF2CC;strokeColor=#D6B656;align=left;verticalAlign=top;spacing=6;fontSize=11;" vertex="1" parent="1"><mxGeometry x="280" y="710" width="520" height="100" as="geometry"/></mxCell>
-        <mxCell id="e1" value="czyta pliki&lt;br&gt;(bind mount)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="csv" target="sim"><mxGeometry relative="1" as="geometry"></mxGeometry></mxCell>
-        <mxCell id="e2" value="SQL, rola shop_app&lt;br&gt;transakcja = jeden zakup" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="sim" target="pg"><mxGeometry relative="1" as="geometry"></mxGeometry></mxCell>
-        <mxCell id="e3" value="replikacja logiczna pgoutput&lt;br&gt;slot + publikacja, rola debezium" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="pg" target="cn"><mxGeometry relative="1" as="geometry"></mxGeometry></mxCell>
-        <mxCell id="e4" value="zdarzenia CDC w AVRO&lt;br&gt;klucz = PK tabeli" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="cn" target="kf"><mxGeometry relative="1" as="geometry"></mxGeometry></mxCell>
-        <mxCell id="e5" value="rejestruje schematy (REST)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="cn" target="sr"><mxGeometry relative="1" as="geometry"></mxGeometry></mxCell>
-        <mxCell id="e6" value="subskrypcja olist.shop.*" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="kf" target="sp"><mxGeometry relative="1" as="geometry"></mxGeometry></mxCell>
-        <mxCell id="e7" value="pobiera schematy wg id (REST)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="sp" target="sr"><mxGeometry relative="1" as="geometry"></mxGeometry></mxCell>
-        <mxCell id="e8" value="S3A: tabele Delta&lt;br&gt;+ checkpointy" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="sp" target="mn"><mxGeometry relative="1" as="geometry"></mxGeometry></mxCell>
-        <mxCell id="e9" value="odczyt gold / ops&lt;br&gt;(delta-rs, DuckDB; konto dashboard)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="mn" target="ds"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1700" y="700"/><mxPoint x="710" y="700"/></Array></mxGeometry></mxCell>
-        <mxCell id="e10" value="HTTP :8501" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;" edge="1" parent="1" source="user" target="ds"><mxGeometry relative="1" as="geometry"></mxGeometry></mxCell>
-        <mxCell id="e11" value="konsumuje i dekoduje&lt;br&gt;(Schema Registry)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="kf" target="cs"><mxGeometry relative="1" as="geometry"></mxGeometry></mxCell>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="bnd" parent="1" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=none;strokeColor=#444444;align=left;verticalAlign=top;fontStyle=1;fontSize=13;spacingLeft=10;spacingTop=4;" value="Mini Data Platform" vertex="1">
+          <mxGeometry height="700" width="1620" x="240" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="csv" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#999999;strokeColor=#6B6B6B;fontColor=#FFFFFF;align=center;verticalAlign=middle;spacing=6;" value="&lt;b&gt;Olist Brazilian E-Commerce&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Pliki CSV, data/olist/]&lt;/i&gt;&lt;br&gt;&lt;br&gt;9 plików, ~100 tys. zamówień" vertex="1">
+          <mxGeometry height="120" width="170" x="30" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="user" parent="1" style="shape=mxgraph.c4.person2;whiteSpace=wrap;html=1;fillColor=#08427B;strokeColor=#073B6F;fontColor=#FFFFFF;align=center;spacing=6;" value="&lt;b&gt;Użytkownik&lt;/b&gt;" vertex="1">
+          <mxGeometry height="120" width="170" x="30" y="510" as="geometry" />
+        </mxCell>
+        <mxCell id="sim" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;verticalAlign=middle;spacing=6;" value="&lt;b&gt;Business Simulator&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: Python 3.12]&lt;/i&gt;&lt;br&gt;&lt;br&gt;odtwarza cykl życia zamówień w przyspieszonym czasie: INSERT → UPDATE → DELETE;" vertex="1">
+          <mxGeometry height="120" width="200" x="320" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="pg" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;spacing=6;" value="&lt;b&gt;PostgreSQL&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: PostgreSQL 16]&lt;/i&gt;&lt;br&gt;&lt;br&gt;schematy shop (CDC)" vertex="1">
+          <mxGeometry height="140" width="200" x="320" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="cn" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;verticalAlign=middle;spacing=6;" value="&lt;b&gt;Debezium&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: Debezium 3.6]&lt;/i&gt;&lt;br&gt;&lt;br&gt;konektor olist-postgres" vertex="1">
+          <mxGeometry height="120" width="200" x="727" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="kf" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;spacing=6;" value="&lt;b&gt;Kafka&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: Kafka 4.3]&lt;/i&gt;&lt;br&gt;&lt;br&gt;1 temat na tabelę (olist.shop.*)" vertex="1">
+          <mxGeometry height="140" width="200" x="1124" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="sr" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;verticalAlign=middle;spacing=6;" value="&lt;b&gt;Schema Registry&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: Confluent SR 8.3]&lt;/i&gt;&lt;br&gt;&lt;br&gt;schematy AVRO klucza i wartościi" vertex="1">
+          <mxGeometry height="120" width="200" x="1124" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="sp" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;verticalAlign=middle;spacing=6;" value="&lt;b&gt;Spark&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: Spark 3.5]&lt;/i&gt;&lt;br&gt;&lt;br&gt;dekodowanie AVRO → bronze (append) → silver (MERGE) → gold (gwiazda, okna)" vertex="1">
+          <mxGeometry height="120" width="200" x="1520" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="mn" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;spacing=6;" value="&lt;b&gt;MinIO + Delta Lake&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: MinIO (S3)]&lt;/i&gt;&lt;br&gt;&lt;br&gt;kubełki bronze / silver / gold / ops / checkpoints" vertex="1">
+          <mxGeometry height="140" width="200" x="1520" y="500" as="geometry" />
+        </mxCell>
+        <mxCell id="ds" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;verticalAlign=middle;spacing=6;" value="&lt;b&gt;Dashboard&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: Streamlit]&lt;/i&gt;" vertex="1">
+          <mxGeometry height="120" width="200" x="727" y="510" as="geometry" />
+        </mxCell>
+        <mxCell id="cs" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1168BD;strokeColor=#0B4884;fontColor=#FFFFFF;align=center;verticalAlign=middle;spacing=6;" value="&lt;b&gt;Consumer (narzędzie)&lt;/b&gt;&lt;br&gt;&lt;i&gt;[Kontener: Python, confluent-kafka]&lt;/i&gt;&lt;br&gt;&lt;br&gt;dekoduje zdarzenia CDC z rejestru, reguły walidacji, śledzenie zamówienia" vertex="1">
+          <mxGeometry height="120" width="200" x="1124" y="510" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="csv" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;" target="sim" value="czyta pliki&lt;br&gt;(bind mount)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" edge="1" parent="1" source="sim" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;" target="pg" value="SQL, rola shop_app&lt;br&gt;transakcja = jeden zakup">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" source="pg" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;" target="cn" value="replikacja logiczna pgoutput&lt;br&gt;slot + publikacja, rola debezium">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" edge="1" parent="1" source="cn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;" target="kf" value="zdarzenia CDC w AVRO">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" edge="1" parent="1" source="cn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="sr" value="rejestruje schematy (REST)">
+          <mxGeometry relative="1" x="-0.6339" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e6" edge="1" parent="1" source="kf" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;" target="sp" value="subskrypcja olist.shop.*">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" edge="1" parent="1" source="sp" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" target="sr" value="pobiera schematy wg id (REST)">
+          <mxGeometry relative="1" x="-0.633" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e8" edge="1" parent="1" source="sp" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="mn" value="S3A: tabele Delta">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" edge="1" parent="1" source="mn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" target="ds" value="odczyt gold / ops&lt;br&gt;(delta-rs, DuckDB; konto dashboard)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1620" y="700" />
+              <mxPoint x="827" y="700" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e10" edge="1" parent="1" source="user" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;" target="ds" value="HTTP :8501">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" edge="1" parent="1" source="kf" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#444444;fontColor=#333333;fontSize=10;labelBackgroundColor=#FFFFFF;endArrow=blockThin;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="cs" value="konsumuje i dekoduje&lt;br&gt;(Schema Registry)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
       </root>
     </mxGraphModel>
   </diagram>

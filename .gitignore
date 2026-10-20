@@ -28,3 +28,6 @@ docs/tutorials/
 
 # Tooling caches
 .ruff_cache/
+
+# draw.io desktop backups
+.$*.bkp
