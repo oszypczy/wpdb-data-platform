@@ -1,0 +1,41 @@
+[project]
+name = "wpdb-platform"
+version = "0.1.0"
+description = "WPDB mini data platform: root project for tests and shared tooling (uv)"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-timeout==2.4.0",
+    "psycopg[binary]==3.3.6",
+    "confluent-kafka[avro]==2.16.0",
+    "requests==2.34.2",
+    "boto3==1.43.115",
+    "python-dotenv==1.2.4",
+    "pyyaml==6.0.3",
+    "ruff==0.17.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers -ra"
+timeout = 600
+markers = [
+    "unit: no Docker, pure logic (make test-unit)",
+    "integration: needs a subset of containers, started by the fixtures (make test-integration)",
+    "e2e: full stack, fresh, including fault injection (make test-e2e)",
+    "slow: takes more than a minute; deselect with -m 'not slow'",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["data", "docs", ".claude"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B", "UP"]

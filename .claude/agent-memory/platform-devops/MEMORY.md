@@ -1,0 +1,2 @@
+- [Environment constraints](project_environment_constraints.md) — Docker Hub quota exhausted on this network (use mirrors), port 9001 taken, arm64, 9.7 GB RAM
+- [MinIO from source](project_minio_from_source.md) — community images withdrawn in 2026; build from tags; CVE-2026-40344 → localhost-only ports

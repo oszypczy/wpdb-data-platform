@@ -1,12 +1,68 @@
+# WPDB mini data platform. Targets are the entry points documented in
+# docs/design/08-operations.md; the agents' stack-ops / run-tests skills use them.
 OLIST_DIR := data/olist
 OLIST_URL := https://www.kaggle.com/api/v1/datasets/download/olistbr/brazilian-ecommerce
 OLIST_STAMP := $(OLIST_DIR)/.downloaded
+WAIT_HEALTHY := .claude/skills/stack-ops/scripts/wait-healthy.sh
+COMPOSE := docker compose
 
-.PHONY: help data clean-data
+.PHONY: help sync env up down reset ps logs lint test-unit test-integration test-integration-fresh test-e2e data clean-data
 
 help:
-	@echo "make data        - download the Olist dataset into $(OLIST_DIR)/ (skipped if present)"
-	@echo "make clean-data  - remove downloaded CSV files"
+	@echo "make sync             - create the uv venv with the test/tooling dependencies (uv sync)"
+	@echo "make up               - docker compose up -d --build, then wait until every service is healthy"
+	@echo "make down             - stop the stack, keep volumes (data, offsets, checkpoints)"
+	@echo "make reset            - stop the stack and WIPE volumes (docker compose down -v)"
+	@echo "make ps               - state and health of the containers"
+	@echo "make logs [S=svc]     - follow logs (all services or one: make logs S=connect)"
+	@echo "make lint             - ruff check + format check"
+	@echo "make test-unit        - pytest -m unit (no Docker)"
+	@echo "make test-integration - pytest -m integration (starts the containers it needs)"
+	@echo "make test-integration-fresh - same from wiped volumes (WPDB_FRESH=1; includes the 180 s startup budget test)"
+	@echo "make test-e2e         - pytest -m e2e on a fresh full stack (WPDB_FRESH=1)"
+	@echo "make data             - download the Olist dataset into $(OLIST_DIR)/ (skipped if present)"
+	@echo "make clean-data       - remove downloaded CSV files"
+
+sync:
+	uv sync
+
+# .env holds the secrets; create it from the example on first use.
+env: .env
+.env:
+	cp .env.example .env
+	@echo "created .env from .env.example (edit it to change secrets)"
+
+up: .env
+	$(COMPOSE) up -d --build
+	$(WAIT_HEALTHY) 300
+
+down:
+	$(COMPOSE) down --remove-orphans
+
+reset:
+	$(COMPOSE) down -v --remove-orphans
+
+ps:
+	$(COMPOSE) ps -a
+
+logs:
+	$(COMPOSE) logs -f --tail=200 $(S)
+
+lint: sync
+	uv run ruff check .
+	uv run ruff format --check .
+
+test-unit: sync
+	uv run pytest -m unit
+
+test-integration: .env sync
+	uv run pytest -m integration
+
+test-integration-fresh: .env sync
+	WPDB_FRESH=1 uv run pytest -m integration
+
+test-e2e: .env sync
+	WPDB_FRESH=1 uv run pytest -m e2e
 
 data: $(OLIST_STAMP)
 

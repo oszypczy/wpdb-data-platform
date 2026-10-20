@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      integration:
+        description: "run the integration suite (full compose stack on the runner)"
+        type: boolean
+        default: true
+
+jobs:
+  lint-unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.18"
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -m unit
+      - name: compose files are valid
+        run: |
+          cp .env.example .env
+          docker compose config -q
+          docker compose --profile pipeline config -q
+
+  integration:
+    if: github.event_name == 'workflow_dispatch' && inputs.integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.18"
+          enable-cache: true
+      - run: uv python install
+      - run: uv sync --frozen
+      - name: build images (MinIO from source, Connect with the AVRO converter)
+        run: |
+          cp .env.example .env
+          docker compose build minio connect
+      - name: start the stack
+        run: |
+          docker compose up -d
+          .claude/skills/stack-ops/scripts/wait-healthy.sh 300
+      - name: integration suite on the running stack
+        run: uv run pytest -m integration
+      - name: integration suite from wiped volumes (180 s startup budget test)
+        run: make test-integration-fresh
+      - name: logs on failure
+        if: failure()
+        run: docker compose ps -a && docker compose logs --no-color --tail=300
+      - name: tear down
+        if: always()
+        run: docker compose down -v --remove-orphans

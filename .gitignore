@@ -25,3 +25,6 @@ data/olist/.downloaded
 
 # Course tutorials: kept locally only, not published
 docs/tutorials/
+
+# Tooling caches
+.ruff_cache/

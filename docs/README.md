@@ -22,7 +22,8 @@ Numeracja odpowiada kolejności w przepływie danych.
 | [05-spark.md](design/05-spark.md) | Spark Structured Streaming | ✅ |
 | [06-minio-delta.md](design/06-minio-delta.md) | MinIO + Delta Lake | ✅ |
 | [07-dashboard.md](design/07-dashboard.md) | Dashboard Streamlit | ✅ |
-| 08-operations.md | Automatyzacja, niezawodność, strategia i zestaw testów | ⏳ |
+| [08-operations.md](design/08-operations.md) | Automatyzacja, niezawodność, strategia i zestaw testów (macierz wersji, start, awarie, reset, testy, CI) | ✅ (etap 0; sekcje e2e uzupełnia etap 6) |
+| [09-agents.md](design/09-agents.md) | Zespół agentów budujących system: role, skille, MCP, orkiestracja | ✅ |
 
 ## Materiały źródłowe (`requirements/`)
 

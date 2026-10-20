@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Semester project (WPDB, master's studies). Design is done and implementation has not started: there is no code and no `docker-compose.yml` yet. The git repo is public at https://github.com/oszypczy/wpdb-data-platform, default branch `main`. The dataset CSVs are not committed. `make data` downloads them into `data/olist/`, skipping `olist_geolocation_dataset.csv` because it is unused. Layout:
+Semester project (WPDB, master's studies). Design is done; implementation is in progress. Stage 0 (platform skeleton: `docker-compose.yml` with the infrastructure services, init containers, pytest harness, `Makefile`, CI) is done; component stages 1-5 follow the plan in `docs/design/00-overview.md`. The git repo is public at https://github.com/oszypczy/wpdb-data-platform, default branch `main`. The dataset CSVs are not committed. `make data` downloads them into `data/olist/`, skipping `olist_geolocation_dataset.csv` because it is unused. Layout:
 - `docs/README.md`: index of all docs, with a status per component.
 - `docs/design/`: our design docs (Polish), numbered in data-flow order: `00-overview.md`, then `NN-<component>.md`. New component docs go here and get a row in `docs/README.md` and `00-overview.md`.
 - `docs/requirements/`: source material. `ProjectDescription.docx` is the official spec, `notes.txt` holds the author's own requirements, and there is an architecture diagram.
@@ -32,6 +32,14 @@ Required deliverables by task (from `ProjectDescription.docx`), as the checklist
 4. **Spark**: a Structured Streaming job reads the Debezium topics, deserializes them and applies basic transformations.
 5. **MinIO**: Spark writes processed data to MinIO as **Delta** format (not plain Parquet as in the tutorials), with docs on how to read the data back.
 6. **Automation**: one `docker-compose.yml` that brings up the whole system from scratch, with volumes, networks, failure handling and data consistency. This means connector registration and MinIO bucket creation must be automated (for example with one-shot init containers), not done by hand as in the tutorials.
+
+## Agents
+
+The system is built by a team of six subagents defined in `.claude/agents/` (one owner per component plus `platform-devops` and an independent `qa-engineer`), with shared procedures in `.claude/skills/` and MCP servers in `.mcp.json`. The team, its contracts and the orchestration order are described in `docs/design/09-agents.md`: devops skeleton first, then stages 1–5 sequentially (owner builds, QA verifies, fix rounds; see `.claude/workflows/build-stage.js`), with pure-logic work in parallel worktrees. Service names and ports are the contract in the `stack-ops` skill.
+
+## Git
+
+- Never add `Co-Authored-By: Claude` or any other Claude/AI attribution to commit messages or PR descriptions.
 
 ## Hard requirements from `docs/requirements/notes.txt`
 
@@ -78,4 +86,4 @@ docker exec -it kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-serve
 docker exec -it postgres psql -U <user> -d <db>
 ```
 
-Default UI ports used in the tutorials: Kafka UI 8080, Spark Master UI 8081, Spark Worker UI 8082, Kafka Connect 8083, MinIO API 9000 / console 9001.
+Ports in this project (contract in the `stack-ops` skill; every host port is bound to 127.0.0.1): Postgres 5432, Kafka `localhost:9092` (containers: `kafka:29092`), Schema Registry 8081, Kafka Connect 8083, MinIO API `127.0.0.1:9000` / console `127.0.0.1:9091` (9001 inside the network; 9091 on the host because 9001 is taken locally), Spark UI 4040, dashboard 8501. The tutorials use Kafka UI 8080, Spark 8081/8082 and MinIO console 9001; do not copy those.

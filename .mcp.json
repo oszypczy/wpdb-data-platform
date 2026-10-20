@@ -1,0 +1,47 @@
+{
+  "mcpServers": {
+    "postgres": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y", "@bytebase/dbhub@1.5.0",
+        "--transport", "stdio",
+        "--config", "${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/dbhub.toml"
+      ],
+      "env": {
+        "READER_PASSWORD": "${READER_PASSWORD:-reader}"
+      }
+    },
+    "kafka": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run", "--project", "${CLAUDE_PROJECT_DIR:-.}/tools/kafka-mcp", "kafka-mcp"
+      ],
+      "env": {
+        "KAFKA_BOOTSTRAP": "${KAFKA_BOOTSTRAP:-localhost:9092}",
+        "SCHEMA_REGISTRY_URL": "${SCHEMA_REGISTRY_URL:-http://localhost:8081}"
+      }
+    },
+    "duckdb": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "mcp-server-motherduck==1.1.0",
+        "--db-path", ":memory:",
+        "--read-write",
+        "--init-sql", "${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/duckdb-init.sql"
+      ],
+      "env": {
+        "AWS_ACCESS_KEY_ID": "${MINIO_SPARK_ACCESS_KEY:-spark}",
+        "AWS_SECRET_ACCESS_KEY": "${MINIO_SPARK_SECRET_KEY:-spark-secret-dev}",
+        "AWS_REGION": "us-east-1"
+      }
+    },
+    "context7": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"]
+    }
+  }
+}

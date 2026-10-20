@@ -1,0 +1,8 @@
+# Internal topics created by kafka-init (topics as code, docs/design/04-kafka.md §3).
+# Format: <name> <partitions> <config>[,<config>...]   (replication factor is always 1)
+# Business topics olist.* plus heartbeat/transaction topics are created by Debezium
+# through topic.creation.* groups in the connector config, not here.
+connect-configs 1 cleanup.policy=compact
+connect-offsets 1 cleanup.policy=compact
+connect-status 1 cleanup.policy=compact
+_schemas 1 cleanup.policy=compact

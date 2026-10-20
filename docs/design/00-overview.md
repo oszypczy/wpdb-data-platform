@@ -46,7 +46,7 @@ Każda obietnica z dokumentów projektowych, np. „po awarii nic nie ginie”, 
 | integracyjny | współpraca kilku komponentów (np. Postgres + Debezium + Kafka + Schema Registry) | wybrane kontenery |
 | e2e | cały system, w tym wstrzykiwanie awarii (`kill` kontenera w trakcie strumienia) i uzgadnianie Postgres ↔ silver | pełny `docker compose` |
 
-Narzędzia i sposób uruchamiania (np. `pytest` z markerami poziomów) zostaną ustalone w `08-operations.md`.
+Narzędzia i sposób uruchamiania (`pytest` z markerami `unit`/`integration`/`e2e`, cele `make test-*`) są opisane w [08-operations.md](08-operations.md) §9.
 
 ## Plan prac
 
@@ -54,6 +54,7 @@ Po każdym etapie system działa i jest zweryfikowany.
 
 | Etap | Zakres | Projekt | Implementacja |
 |---|---|---|---|
+| 0 | Szkielet platformy: `docker-compose.yml` z infrastrukturą (Postgres, Kafka KRaft, Schema Registry, Connect z konwerterem AVRO, MinIO), healthchecki, kontenery startowe, `.env.example`, harness `pytest`, `Makefile`, CI, macierz wersji ([08](08-operations.md)) | ✅ | ✅ |
 | 1 | Dane + Business System + PostgreSQL | ✅ | ⏳ |
 | 2 | Debezium + Kafka + Schema Registry (+ consumer) | ✅ | ⏳ |
 | 3 | Spark: bronze → silver | ✅ | ⏳ |

@@ -55,7 +55,9 @@ Publikację tworzy skrypt startowy, a Debezium tylko z niej korzysta (`publicati
 | Rola | Uprawnienia |
 |---|---|
 | `shop_app` (symulator) | DDL i DML w `shop`, zapis w `sim` |
-| `debezium` | `REPLICATION` + `SELECT` na `shop` || `postgres` | tylko skrypty startowe |
+| `debezium` | `REPLICATION` + `SELECT` na `shop` |
+| `reader` | tylko `SELECT` na `shop` i `sim`: odczyt uzgadniający w testach i podgląd dla agentów (MCP `postgres`, [09-agents.md](09-agents.md) §3) |
+| `postgres` | tylko skrypty startowe |
 
 ## 5. Rozszerzenie: bezpieczeństwo slotu replikacyjnego
 

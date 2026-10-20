@@ -1,0 +1,359 @@
+# WPDB mini data platform. One `docker compose up -d --build` from a clean machine.
+#
+# Service names, ports and internal addresses are the contract shared by all
+# agents (.claude/skills/stack-ops/SKILL.md); operations are described in
+# docs/design/08-operations.md. Versions are pinned here and in the Dockerfiles
+# (the version matrix in 08 §1). Secrets come only from .env (see .env.example).
+#
+# Ordering is expressed with depends_on + condition: service_healthy /
+# service_completed_successfully and real healthchecks; no sleep anywhere.
+# Inside command:/entrypoint: use $$VAR for values resolved in the container
+# (compose resolves ${VAR} from the host .env at parse time).
+#
+# Every published port is bound to 127.0.0.1: the stack is a single-machine lab
+# and the Connect REST API (config.providers=env) would otherwise let anyone on
+# the LAN register a connector that leaks DEBEZIUM_DB_PASSWORD (08 §3).
+
+name: wpdb
+
+x-healthcheck-defaults: &hc
+  interval: 10s
+  timeout: 5s
+  retries: 12
+
+services:
+  # ---------------------------------------------------------------- PostgreSQL
+  postgres:
+    image: postgres:16.15
+    container_name: postgres
+    restart: unless-stopped
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    environment:
+      POSTGRES_DB: shop
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set it in .env}
+      SHOP_APP_PASSWORD: ${SHOP_APP_PASSWORD:?set it in .env}
+      DEBEZIUM_DB_PASSWORD: ${DEBEZIUM_DB_PASSWORD:?set it in .env}
+      READER_PASSWORD: ${READER_PASSWORD:?set it in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "pg_isready -U postgres -d shop"]
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    networks: [wpdb]
+
+  # --------------------------------------------------------------------- Kafka
+  kafka:
+    image: confluentinc/cp-kafka:8.3.2
+    container_name: kafka
+    restart: unless-stopped
+    environment:
+      # KRaft, single node acting as broker and controller
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:?set it in .env}
+      # two client listeners: INTERNAL for containers, EXTERNAL for the host
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # topics as code: nothing is created implicitly
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # single node: no replication anywhere
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx1g
+    ports:
+      - "127.0.0.1:9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:29092 --list >/dev/null 2>&1"]
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 1536m
+    networks: [wpdb]
+
+  kafka-init:
+    image: confluentinc/cp-kafka:8.3.2
+    container_name: kafka-init
+    restart: "no"
+    entrypoint: ["bash", "/kafka/create-topics.sh"]
+    environment:
+      BOOTSTRAP: kafka:29092
+      TOPICS_FILE: /kafka/topics.txt
+    volumes:
+      - ./kafka/topics.txt:/kafka/topics.txt:ro
+      - ./kafka/create-topics.sh:/kafka/create-topics.sh:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    networks: [wpdb]
+
+  # ----------------------------------------------------------- Schema Registry
+  schema-registry:
+    image: confluentinc/cp-schema-registry:8.3.2
+    container_name: schema-registry
+    restart: unless-stopped
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC: _schemas
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
+      # explicit global compatibility: nullable field added passes, type change is rejected
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: BACKWARD
+      SCHEMA_REGISTRY_HEAP_OPTS: -Xms128m -Xmx256m
+    ports:
+      - "127.0.0.1:8081:8081"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      <<: *hc
+      # the cp-schema-registry image ships python3 but no curl; urlopen raises on HTTP >= 400
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request as u; u.urlopen('http://localhost:8081/subjects', timeout=4)\""]
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    networks: [wpdb]
+
+  # ----------------------------------------------------- Kafka Connect (Debezium)
+  connect:
+    build:
+      context: ./connect
+    image: wpdb/connect
+    container_name: connect
+    restart: unless-stopped
+    environment:
+      # Debezium image conventions
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: connect
+      CONFIG_STORAGE_TOPIC: connect-configs
+      OFFSET_STORAGE_TOPIC: connect-offsets
+      STATUS_STORAGE_TOPIC: connect-status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
+      VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      # secrets resolved inside the worker: "${env:DEBEZIUM_DB_PASSWORD}" in connector JSON
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
+      # connectors may tune their producer (acks, compression, idempotence)
+      CONNECT_CONNECTOR_CLIENT_CONFIG_OVERRIDE_POLICY: All
+      DEBEZIUM_DB_PASSWORD: ${DEBEZIUM_DB_PASSWORD:?set it in .env}
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx1g
+    ports:
+      - "127.0.0.1:8083:8083"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      schema-registry:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors >/dev/null"]
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 1536m
+    networks: [wpdb]
+
+  connect-init:
+    image: curlimages/curl:8.17.0
+    container_name: connect-init
+    restart: "no"
+    entrypoint: ["sh", "/scripts/init.sh"]
+    environment:
+      CONNECT_URL: http://connect:8083
+      CONNECTORS_DIR: /connect
+      CONNECT_INIT_TIMEOUT: 120
+    volumes:
+      - ./connect/init.sh:/scripts/init.sh:ro
+      - ./connect/connectors:/connect:ro
+    depends_on:
+      connect:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    networks: [wpdb]
+
+  # --------------------------------------------------------------------- MinIO
+  minio:
+    build:
+      context: ./minio
+    image: wpdb/minio
+    container_name: minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set it in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set it in .env}
+    ports:
+      # localhost only: the last community release has an unpatched auth bypass
+      # (CVE-2026-40344); the console is on host port 9091 because 9001 is taken
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9091:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live"]
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    networks: [wpdb]
+
+  minio-init:
+    image: wpdb/minio
+    container_name: minio-init
+    restart: "no"
+    entrypoint: ["sh", "/minio/init.sh"]
+    environment:
+      MINIO_URL: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set it in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set it in .env}
+      MINIO_SPARK_ACCESS_KEY: ${MINIO_SPARK_ACCESS_KEY:?set it in .env}
+      MINIO_SPARK_SECRET_KEY: ${MINIO_SPARK_SECRET_KEY:?set it in .env}
+      MINIO_DASHBOARD_ACCESS_KEY: ${MINIO_DASHBOARD_ACCESS_KEY:?set it in .env}
+      MINIO_DASHBOARD_SECRET_KEY: ${MINIO_DASHBOARD_SECRET_KEY:?set it in .env}
+    volumes:
+      - ./minio/init.sh:/minio/init.sh:ro
+      - ./minio/policies:/minio/policies:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    networks: [wpdb]
+
+  # ------------------------------------------------- pipeline (profile, stages 1-5)
+  simulator:
+    build:
+      context: ./simulator
+    image: wpdb/simulator
+    container_name: simulator
+    restart: unless-stopped
+    profiles: [pipeline]
+    environment:
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_DB: shop
+      PG_USER: shop_app
+      PG_PASSWORD: ${SHOP_APP_PASSWORD:?set it in .env}
+      SIM_SPEED: ${SIM_SPEED:-1440}
+      MAX_EVENTS_PER_SEC: ${MAX_EVENTS_PER_SEC:-20}
+      SIM_START: ${SIM_START:-2017-01-01}
+      SIM_END: ${SIM_END:-2018-08-31}
+    volumes:
+      - ./data/olist:/data/olist:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    networks: [wpdb]
+
+  spark:
+    build:
+      context: ./spark
+    image: wpdb/spark
+    container_name: spark
+    restart: unless-stopped
+    profiles: [pipeline]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      S3_ENDPOINT: http://minio:9000
+      MINIO_SPARK_ACCESS_KEY: ${MINIO_SPARK_ACCESS_KEY:?set it in .env}
+      MINIO_SPARK_SECRET_KEY: ${MINIO_SPARK_SECRET_KEY:?set it in .env}
+    ports:
+      - "127.0.0.1:4040:4040"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+    networks: [wpdb]
+
+  dashboard:
+    build:
+      context: ./dashboard
+    image: wpdb/dashboard
+    container_name: dashboard
+    restart: unless-stopped
+    profiles: [pipeline]
+    environment:
+      S3_ENDPOINT: http://minio:9000
+      MINIO_DASHBOARD_ACCESS_KEY: ${MINIO_DASHBOARD_ACCESS_KEY:?set it in .env}
+      MINIO_DASHBOARD_SECRET_KEY: ${MINIO_DASHBOARD_SECRET_KEY:?set it in .env}
+    ports:
+      - "127.0.0.1:8501:8501"
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    networks: [wpdb]
+
+volumes:
+  pg_data:
+  kafka_data:
+  minio_data:
+
+networks:
+  wpdb:
+    name: wpdb

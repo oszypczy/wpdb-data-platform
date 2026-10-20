@@ -1,0 +1,151 @@
+"""Static checks of docker-compose.yml and .env.example (08-operations.md §10, stage 0).
+
+No Docker needed: the files are parsed as text / YAML.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+import yaml
+
+ROOT = Path(__file__).resolve().parents[2]
+COMPOSE = ROOT / "docker-compose.yml"
+ENV_EXAMPLE = ROOT / ".env.example"
+
+# ${VAR}, ${VAR:-default}, ${VAR:?msg} ... but not $${...} (container-side)
+COMPOSE_VAR = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)")
+# a single $ not part of $$ (host-side interpolation in a container command)
+SINGLE_DOLLAR = re.compile(r"(?<!\$)\$(?!\$)")
+
+pytestmark = pytest.mark.unit
+
+
+def compose_without_comments() -> str:
+    """The compose text with YAML comments removed (comments may quote ${VAR} examples)."""
+    out = []
+    for line in COMPOSE.read_text().splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        out.append(re.sub(r"\s+#.*$", "", line))
+    return "\n".join(out)
+
+
+def env_example_keys() -> set[str]:
+    keys = set()
+    for line in ENV_EXAMPLE.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        keys.add(line.split("=", 1)[0].strip())
+    return keys
+
+
+def test_env_example_covers_compose_variables():
+    """08 §G: every ${VAR} used in docker-compose.yml is declared in .env.example."""
+    used = set(COMPOSE_VAR.findall(compose_without_comments()))
+    assert used, "compose file references no variables?"
+    missing = sorted(used - env_example_keys())
+    assert missing == [], f"variables used in compose but absent from .env.example: {missing}"
+
+
+def _strings(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [s for s in value if isinstance(s, str)]
+
+
+def test_commands_use_double_dollar():
+    """08 §G: command:/entrypoint:/healthcheck use $$ for container-side variables.
+
+    Compose resolves ${VAR} from the host .env at parse time, so a single $ in a
+    container command is almost always a bug (the tutorial pitfall from CLAUDE.md).
+    """
+    doc = yaml.safe_load(COMPOSE.read_text())
+    offenders = []
+    for name, svc in doc["services"].items():
+        for key in ("command", "entrypoint"):
+            for s in _strings(svc.get(key)):
+                if SINGLE_DOLLAR.search(s):
+                    offenders.append(f"{name}.{key}: {s!r}")
+        hc = svc.get("healthcheck") or {}
+        for s in _strings(hc.get("test")):
+            if SINGLE_DOLLAR.search(s):
+                offenders.append(f"{name}.healthcheck.test: {s!r}")
+    assert offenders == [], "single $ in container commands:\n" + "\n".join(offenders)
+
+
+def test_every_long_running_service_has_healthcheck_and_restart_policy():
+    """08 §3/§5: long-running services declare a healthcheck and restart: unless-stopped;
+    init containers declare restart: "no" and depend on a healthy parent."""
+    doc = yaml.safe_load(COMPOSE.read_text())
+    init = {"kafka-init", "connect-init", "minio-init"}
+    placeholders = {"simulator", "spark", "dashboard"}  # healthchecks arrive with their stages
+    for name, svc in doc["services"].items():
+        if name in init:
+            assert str(svc.get("restart")) == "no", f"{name}: init containers must not restart"
+            assert svc.get("depends_on"), f"{name}: init container without depends_on"
+            continue
+        assert svc.get("restart") == "unless-stopped", f"{name}: missing restart: unless-stopped"
+        if name not in placeholders:
+            assert "healthcheck" in svc, f"{name}: missing healthcheck"
+    for name, svc in doc["services"].items():
+        for dep, cond in (svc.get("depends_on") or {}).items():
+            assert cond.get("condition") in ("service_healthy", "service_completed_successfully"), (
+                f"{name} -> {dep}: depends_on needs a condition, not plain ordering"
+            )
+
+
+def test_no_latest_tags():
+    """version-matrix skill: every image is pinned to an exact tag, never latest/untagged."""
+    doc = yaml.safe_load(COMPOSE.read_text())
+    for name, svc in doc["services"].items():
+        image = svc.get("image", "")
+        if "build" in svc or image.startswith("wpdb/"):
+            continue  # built images are tagged wpdb/<name>; versions live in the Dockerfile
+        assert ":" in image and not image.endswith(":latest"), f"{name}: unpinned image {image!r}"
+
+
+DOCKERFILES = [ROOT / "connect" / "Dockerfile", ROOT / "minio" / "Dockerfile"]
+
+
+def test_dockerfiles_pin_base_images():
+    """08 §1: every FROM in the built images resolves to an image with an exact tag.
+
+    ARG defaults are substituted first; no latest, no untagged, no unresolved variable.
+    """
+    offenders = []
+    for df in DOCKERFILES:
+        args: dict[str, str] = {}
+        for raw in df.read_text().splitlines():
+            line = raw.strip()
+            if m := re.match(r"ARG\s+([A-Za-z_]+)=(\S+)", line):
+                args[m.group(1)] = m.group(2)
+                continue
+            if m := re.match(r"FROM\s+(\S+)", line):
+                ref = m.group(1)
+                for name, value in args.items():
+                    ref = ref.replace("${" + name + "}", value)
+                image = ref.split("@")[0]
+                last = image.split("/")[-1]
+                tag = last.split(":", 1)[1] if ":" in last else ""
+                if "${" in ref or not tag or tag == "latest":
+                    offenders.append(f"{df.name}: FROM {ref}")
+    assert offenders == [], "unpinned base images:\n" + "\n".join(offenders)
+
+
+def test_all_published_ports_bound_to_loopback():
+    """08 §3: every ports: entry is published on 127.0.0.1 only (single-machine lab; Connect REST
+    with config.providers=env must not be reachable from the LAN)."""
+    doc = yaml.safe_load(COMPOSE.read_text())
+    offenders = []
+    for name, svc in doc["services"].items():
+        for entry in svc.get("ports") or []:
+            text = entry if isinstance(entry, str) else f"{entry.get('host_ip', '')}:{entry}"
+            if not str(text).startswith("127.0.0.1:"):
+                offenders.append(f"{name}: {entry!r}")
+    assert offenders == [], "ports not bound to loopback:\n" + "\n".join(offenders)

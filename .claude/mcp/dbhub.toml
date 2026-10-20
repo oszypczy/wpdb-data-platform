@@ -1,0 +1,22 @@
+# DBHub (MCP "postgres") configuration. Read-only access to the shop database
+# through the `reader` role; the password comes from READER_PASSWORD (set in
+# .mcp.json from the host env, default "reader" as in .env.example).
+# lazy=true: the server starts even when the stack is down and connects on the
+# first query.
+
+[[sources]]
+id = "shop"
+dsn = "postgres://reader:${READER_PASSWORD}@localhost:5432/shop?sslmode=disable"
+lazy = true
+connection_timeout = 10
+query_timeout = 30
+
+[[tools]]
+name = "execute_sql"
+source = "shop"
+readonly = true   # SELECT / SHOW / EXPLAIN only
+max_rows = 500
+
+[[tools]]
+name = "search_objects"
+source = "shop"
