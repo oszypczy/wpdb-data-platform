@@ -5,15 +5,15 @@ argument-hint: "[status|register|restart|slot]"
 ---
 # Debezium connector operations
 
-Connector name: `olist-postgres`. Config file: `connect/connectors/olist-postgres.json`
-(every `connect/connectors/*.json` is registered by `connect-init`)
+Connector name: `olist-postgres`. Config file: `containers/connect/connectors/olist-postgres.json`
+(every `containers/connect/connectors/*.json` is registered by `connect-init`)
 (pure JSON, no comments; secrets as `${env:DEBEZIUM_DB_PASSWORD}` resolved by the
 Connect `EnvVarConfigProvider`).
 
 ```bash
 # idempotent registration (create or update) - this is what connect-init does
 curl -s -X PUT localhost:8083/connectors/olist-postgres/config \
-  -H 'Content-Type: application/json' --data @connect/connectors/olist-postgres.json | jq
+  -H 'Content-Type: application/json' --data @containers/connect/connectors/olist-postgres.json | jq
 
 curl -s localhost:8083/connectors/olist-postgres/status | jq        # RUNNING / FAILED + trace
 curl -s localhost:8083/connectors/olist-postgres/config | jq       # password must stay masked

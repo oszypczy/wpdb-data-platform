@@ -12,7 +12,7 @@ Procedura: skill `version-matrix`. Kotwica linii Kafki to Debezium: `connect:3.6
 |---|---|---|---|---|
 | PostgreSQL | `postgres` | `16.15` | Debezium 3.6 wspiera PG 14–18; `FOR TABLES IN SCHEMA` wymaga ≥ 15 | [debezium.io/releases/3.6](https://debezium.io/releases/3.6/) „Compatibility” |
 | Debezium Connect | `quay.io/debezium/connect` | `3.6.3.Final` | Kafka 4.3.0 w obrazie (`/kafka/libs/kafka-clients-4.3.0.jar`), Java 25, użytkownik `kafka` (uid 1001) | sprawdzone `docker run … ls /kafka/libs`; test `test_connect.py::test_worker_kafka_version_matches_broker_line` |
-| Konwerter AVRO | Confluent Hub `confluentinc/kafka-connect-avro-converter` | `8.3.2` (zip, 38 JAR-ów łącznie z `kafka-schema-registry-client-8.3.2`) | Schema Registry 8.3.2; klasa `io.confluent.connect.avro.AvroConverter`; obraz Debezium ≥ 2.0 nie ma konwertera, więc `connect/Dockerfile` rozpakowuje zip do `/kafka/connect/confluent-avro-converter/` | [hub-downloads.confluent.io](https://hub-downloads.confluent.io/api/plugins/confluentinc/kafka-connect-avro-converter/versions/8.3.2/confluentinc-kafka-connect-avro-converter-8.3.2.zip) (HTTP 200); test `test_connect.py::test_plugins_include_avro_converter` |
+| Konwerter AVRO | Confluent Hub `confluentinc/kafka-connect-avro-converter` | `8.3.2` (zip, 38 JAR-ów łącznie z `kafka-schema-registry-client-8.3.2`) | Schema Registry 8.3.2; klasa `io.confluent.connect.avro.AvroConverter`; obraz Debezium ≥ 2.0 nie ma konwertera, więc `containers/connect/Dockerfile` rozpakowuje zip do `/kafka/connect/confluent-avro-converter/` | [hub-downloads.confluent.io](https://hub-downloads.confluent.io/api/plugins/confluentinc/kafka-connect-avro-converter/versions/8.3.2/confluentinc-kafka-connect-avro-converter-8.3.2.zip) (HTTP 200); test `test_connect.py::test_plugins_include_avro_converter` |
 | Kafka | `confluentinc/cp-kafka` | `8.3.2` | Kafka 4.3.x, KRaft combined (`KAFKA_PROCESS_ROLES=broker,controller`), CLI `kafka-topics` na `PATH` | [docs.confluent.io: CP 8.3 ↔ Kafka 4.3](https://docs.confluent.io/platform/current/installation/versions-interoperability.html); `cp-all-in-one` v8.3.2 |
 | Schema Registry | `confluentinc/cp-schema-registry` | `8.3.2` | ta sama linia CP co broker i konwerter | j.w. |
 | Kafka Connect: sekrety | `org.apache.kafka.common.config.provider.EnvVarConfigProvider` | w Kafce 4.3 | `${env:DEBEZIUM_DB_PASSWORD}` w JSON konektora | [Kafka KIP-887](https://cwiki.apache.org/confluence/display/KAFKA/KIP-887) |
@@ -28,7 +28,7 @@ Procedura: skill `version-matrix`. Kotwica linii Kafki to Debezium: `connect:3.6
 
 Plan awaryjny, gdyby linia CP 8.3 sprawiła kłopoty: Debezium `3.2.0.Final` (Kafka 4.0) + CP `8.0.8`.
 
-Zasady: żadnego `latest` (test `test_compose_file.py::test_no_latest_tags`); wersje obrazów gotowych są w `docker-compose.yml`, wersje obrazów budowanych w `ARG` ich Dockerfile'i (`minio/Dockerfile`, `connect/Dockerfile`); `.env` zawiera tylko sekrety i parametry, nigdy wersje.
+Zasady: żadnego `latest` (test `test_compose_file.py::test_no_latest_tags`); wersje obrazów gotowych są w `docker-compose.yml`, wersje obrazów budowanych w `ARG` ich Dockerfile'i (`containers/minio/Dockerfile`, `containers/connect/Dockerfile`); `.env` zawiera tylko sekrety i parametry, nigdy wersje.
 
 ## 2. Kolejność startu
 
@@ -45,11 +45,11 @@ postgres ──► simulator        kafka + schema-registry + minio-init ──�
 | Krok | Usługa | Czeka na | Healthy, gdy |
 |---|---|---|---|
 | 1 | `postgres`, `kafka`, `minio` | nic | `pg_isready`; `kafka-topics --list`; `GET /minio/health/live` |
-| 2 | `kafka-init` | `kafka` healthy | exit 0 po `kafka-topics --create --if-not-exists` z `kafka/topics.txt` |
+| 2 | `kafka-init` | `kafka` healthy | exit 0 po `kafka-topics --create --if-not-exists` z `containers/kafka/topics.txt` |
 | 2 | `minio-init` | `minio` healthy | exit 0 po kubełkach, politykach, kontach |
 | 3 | `schema-registry` | `kafka` healthy, `kafka-init` exit 0 | `GET /subjects` |
 | 4 | `connect` | `kafka`, `schema-registry`, `postgres` healthy; `kafka-init` exit 0 | `GET /connectors` |
-| 5 | `connect-init` | `connect` healthy | exit 0 (bez plików w `connect/connectors/`: „no connectors to register”) |
+| 5 | `connect-init` | `connect` healthy | exit 0 (bez plików w `containers/connect/connectors/`: „no connectors to register”) |
 
 **Zmierzony czas do „all services healthy”** (Apple Silicon, 8 CPU, 9.7 GB RAM dla Dockera, obrazy już zbudowane i pobrane): patrz §2.1. Budżet w teście `test_stack.py::test_fresh_stack_healthy_within_budget`: ≤ 180 s od `down -v`.
 
@@ -90,9 +90,9 @@ Dwa listenery Kafki (naprawa błędu z tutoriali): `INTERNAL://kafka:29092` dla 
 
 | Kontener | Obraz | Co robi | Jak jest idempotentny |
 |---|---|---|---|
-| `kafka-init` | `cp-kafka` (ten sam, co broker) | tematy wewnętrzne z `kafka/topics.txt` (`connect-configs/offsets/status`, `_schemas`; 1 partycja, compact) | `--create --if-not-exists`; istniejący temat o innych parametrach jest tylko opisany, nie zmieniany |
-| `minio-init` | `wpdb/minio` (ma `mc`) | kubełki `bronze silver gold ops checkpoints`, polityki `spark`/`dashboard` z `minio/policies/*.json`, konta `spark` (RW wszędzie) i `dashboard` (RO `gold`, `ops`) | `mc mb --ignore-existing`; `mc admin policy create` i `mc admin user add` nadpisują; `mc admin policy attach` jest strzeżone przez `mc admin user info --json` (ponowne `attach` zwróciłoby błąd) |
-| `connect-init` | `curlimages/curl` | `PUT /connectors/<nazwa>/config` dla każdego `connect/connectors/*.json`, czeka na `RUNNING` (timeout 120 s) | `PUT` tworzy lub aktualizuje (tutorialowy `POST` dałby 409); bez plików loguje „no connectors to register” i kończy się kodem 0 |
+| `kafka-init` | `cp-kafka` (ten sam, co broker) | tematy wewnętrzne z `containers/kafka/topics.txt` (`connect-configs/offsets/status`, `_schemas`; 1 partycja, compact) | `--create --if-not-exists`; istniejący temat o innych parametrach jest tylko opisany, nie zmieniany |
+| `minio-init` | `wpdb/minio` (ma `mc`) | kubełki `bronze silver gold ops checkpoints`, polityki `spark`/`dashboard` z `containers/minio/policies/*.json`, konta `spark` (RW wszędzie) i `dashboard` (RO `gold`, `ops`) | `mc mb --ignore-existing`; `mc admin policy create` i `mc admin user add` nadpisują; `mc admin policy attach` jest strzeżone przez `mc admin user info --json` (ponowne `attach` zwróciłoby błąd) |
+| `connect-init` | `curlimages/curl` | `PUT /connectors/<nazwa>/config` dla każdego `containers/connect/connectors/*.json`, czeka na `RUNNING` (timeout 120 s) | `PUT` tworzy lub aktualizuje (tutorialowy `POST` dałby 409); bez plików loguje „no connectors to register” i kończy się kodem 0 |
 
 Ponowne uruchomienie jednego kontenera startowego: `docker compose up -d --force-recreate --no-deps <nazwa>`; w testach `ComposeStack.rerun_init(nazwa)`. Test: `test_stack.py::test_init_container_idempotent[kafka-init|minio-init|connect-init]` (stan przed i po jest identyczny, kod 0).
 
@@ -119,7 +119,7 @@ Ograniczenia zasobów (`deploy.resources.limits.memory`) chronią maszynę przed
 |---|---|---|
 | `make down` (`docker compose down --remove-orphans`) | zatrzymuje kontenery, **zachowuje** wolumeny: dane Postgresa, log Kafki, offsety Connecta, obiekty i checkpointy w MinIO | zwykłe zatrzymanie; po `make up` wszystko wznawia się od miejsca, w którym stanęło |
 | `make reset` (`docker compose down -v --remove-orphans`) | jak wyżej plus **usuwa wolumeny**; następny `make up` wykonuje initdb Postgresa, formatuje KRaft i uruchamia kontenery startowe od zera | zmiana skryptów `initdb/`, zmiana `CLUSTER_ID`, uszkodzony checkpoint, zmiana schematu lub trybu wyjścia sinku Sparka |
-| `docker compose up -d --force-recreate --no-deps <init>` | powtarza jeden kontener startowy | nowy konektor w `connect/connectors/`, nowy kubełek, nowy temat w `topics.txt` |
+| `docker compose up -d --force-recreate --no-deps <init>` | powtarza jeden kontener startowy | nowy konektor w `containers/connect/connectors/`, nowy kubełek, nowy temat w `topics.txt` |
 
 Reset sinku Sparka (etap 3): checkpoint **i** katalog tabeli czyścimy razem, nigdy osobno (skill `stack-ops`).
 
@@ -180,7 +180,7 @@ Status: ✅ przechodzi, ⏳ zaplanowany (etap). Wiersze etapu 0 z planu `qa-engi
 | 08 §8 | `command:`/`entrypoint:`/healthcheck używają `$$` | unit | `test_compose_file.py::test_commands_use_double_dollar` | ✅ |
 | 08 §3, §5 | każda usługa ma healthcheck i `restart: unless-stopped`; init `restart: "no"`; `depends_on` tylko z warunkiem | unit | `test_compose_file.py::test_every_long_running_service_has_healthcheck_and_restart_policy` | ✅ |
 | 08 §1 | brak `latest`, każdy obraz z tagiem (compose) | unit | `test_compose_file.py::test_no_latest_tags` | ✅ |
-| 08 §1 | `FROM` w `connect/Dockerfile` i `minio/Dockerfile` z dokładnym tagiem po podstawieniu `ARG` | unit | `test_compose_file.py::test_dockerfiles_pin_base_images` | ✅ |
+| 08 §1 | `FROM` w `containers/connect/Dockerfile` i `containers/minio/Dockerfile` z dokładnym tagiem po podstawieniu `ARG` | unit | `test_compose_file.py::test_dockerfiles_pin_base_images` | ✅ |
 | 08 §3 | każdy `ports:` publikowany na `127.0.0.1` | unit | `test_compose_file.py::test_all_published_ports_bound_to_loopback` | ✅ |
 | 08 §2 | `docker compose config` poprawny (domyślnie i `--profile pipeline`) | integracyjny | `tests/integration/test_stack.py::test_compose_config_valid` | ✅ |
 | 08 §2, §3 | wszystkie usługi healthy, kontenery startowe exit 0 | integracyjny | `test_stack.py::test_all_services_healthy` | ✅ |
@@ -195,7 +195,7 @@ Status: ✅ przechodzi, ⏳ zaplanowany (etap). Wiersze etapu 0 z planu `qa-engi
 | 04 §1, §8 | Kafka z hosta `localhost:9092` | integracyjny | `tests/integration/test_kafka.py::test_reachable_from_host` | ✅ |
 | 04 §1, §8 | Kafka z kontenera `kafka:29092` | integracyjny | `test_kafka.py::test_reachable_from_container` | ✅ |
 | 04 §3, §8 | auto-tworzenie tematów wyłączone (broker config + produkcja do nieistniejącego tematu) | integracyjny | `test_kafka.py::test_auto_create_disabled`, `::test_unknown_topic_raises_for_admin_describe` | ✅ |
-| 04 §3 | tematy wewnętrzne = `kafka/topics.txt` (partycje, `cleanup.policy`) | integracyjny | `test_kafka.py::test_internal_topics_match_topics_txt` | ✅ |
+| 04 §3 | tematy wewnętrzne = `containers/kafka/topics.txt` (partycje, `cleanup.policy`) | integracyjny | `test_kafka.py::test_internal_topics_match_topics_txt` | ✅ |
 | 04 §1 | produkcja z hosta do jawnie utworzonego tematu jest potwierdzana (`acks=all`) | integracyjny | `test_kafka.py::test_producer_to_explicitly_created_topic_is_acked` | ✅ |
 | 04 §1 | `/subjects` odpowiada; rejestr w `_schemas`; tryb READWRITE | integracyjny | `tests/integration/test_schema_registry.py::test_subjects_endpoint`, `::test_registry_stores_schemas_in__schemas_topic`, `::test_mode_is_readwrite` | ✅ |
 | 04 §5 | zgodność globalna BACKWARD | integracyjny | `test_schema_registry.py::test_global_compatibility_backward` | ✅ |
@@ -251,7 +251,7 @@ Pierwsze uruchomienie buduje `wpdb/minio` ze źródeł (ok. 2 min, cache BuildKi
 Stan na 2026-10-20 (decyzja użytkownika z etapu 0, szczegóły w [06-minio-delta.md](06-minio-delta.md) §12):
 
 - **Co się stało.** MinIO zarchiwizowało repozytoria `minio/minio` i `minio/mc` (2026-04-24); obrazy community zniknęły z Docker Hub i Quay (2026-09); `dl.min.io` zwraca 410 dla binariów. Tutoriale z laboratoriów zakładają `minio/minio:latest`, który już nie istnieje. Specyfikacja projektu wymaga MinIO, więc zamiast zamiennika zgodnego z S3 budujemy MinIO sami.
-- **Jak.** `minio/Dockerfile`: etap `build` na `golang:1.24.13-bookworm` pobiera archiwa źródłowe tagów `RELEASE.2025-10-15T17-29-55Z` (`minio`) i `RELEASE.2025-08-13T08-35-41Z` (`mc`) z `codeload.github.com`, buduje `CGO_ENABLED=0 go build -trimpath` z `-ldflags` odpowiadającymi `buildscripts/gen-ldflags.go` (`cmd.ReleaseTag`, `cmd.Version` w RFC 3339, `cmd.CopyrightYear`; `CommitID` zostaje domyślny, bo archiwum nie ma metadanych git). Cache modułów i kompilacji Go to `--mount=type=cache`, więc ponowny build po zmianie tagu kompiluje tylko różnicę. Etap runtime: `debian:bookworm-slim` + `ca-certificates` + `curl` (healthcheck) + oba binaria w `/usr/local/bin`. `minio --version` zwraca dokładnie tag, co sprawdza `test_minio.py::test_server_version_matches_pinned_tag`. Pierwszy build: 1 min 54 s na Apple M-series; obraz 338 MB.
+- **Jak.** `containers/minio/Dockerfile`: etap `build` na `golang:1.24.13-bookworm` pobiera archiwa źródłowe tagów `RELEASE.2025-10-15T17-29-55Z` (`minio`) i `RELEASE.2025-08-13T08-35-41Z` (`mc`) z `codeload.github.com`, buduje `CGO_ENABLED=0 go build -trimpath` z `-ldflags` odpowiadającymi `buildscripts/gen-ldflags.go` (`cmd.ReleaseTag`, `cmd.Version` w RFC 3339, `cmd.CopyrightYear`; `CommitID` zostaje domyślny, bo archiwum nie ma metadanych git). Cache modułów i kompilacji Go to `--mount=type=cache`, więc ponowny build po zmianie tagu kompiluje tylko różnicę. Etap runtime: `debian:bookworm-slim` + `ca-certificates` + `curl` (healthcheck) + oba binaria w `/usr/local/bin`. `minio --version` zwraca dokładnie tag, co sprawdza `test_minio.py::test_server_version_matches_pinned_tag`. Pierwszy build: 1 min 54 s na Apple M-series; obraz 338 MB.
 - **Konsola.** Od wydań z maja 2025 konsola community to tylko przeglądarka obiektów; konta i polityki zarządza `mc` w `minio-init`. Konsola jest na porcie hosta **9091** (w sieci `minio:9001`), bo 9001 zajmuje inny kontener na maszynie autora.
 - **CVE-2026-40344.** Ostatnie wydanie community ma niezałataną lukę obejścia uwierzytelnienia (wymaga ważnego klucza z prawem zapisu). Ograniczenia: API i konsola publikowane tylko na `127.0.0.1` (test `test_minio.py::test_api_bound_to_localhost_only`; od przeglądu bezpieczeństwa etapu 0 ta sama zasada obejmuje wszystkie porty stosu, §3), root używany wyłącznie przez `minio-init`, konta `spark`/`dashboard` z minimalnymi politykami, stos to laboratorium na jednej maszynie. Ryzyko akceptowane i opisane, bo alternatywą byłaby zmiana komponentu wymaganego przez specyfikację.
 - **Fallback** (nieużywany): `bitnamilegacy/minio:2025.7.23-debian-12-r5`.
@@ -260,7 +260,7 @@ Stan na 2026-10-20 (decyzja użytkownika z etapu 0, szczegóły w [06-minio-delt
 ## 14. Do weryfikacji w kolejnych etapach
 
 - **Snapshot przed startem konektora** (01 §4, 03 §2): `simulator` jest w profilu `pipeline`, więc dziś `connect-init` nie czeka na preload. Etap 2 decyduje: `connect-init` czeka na marker preloadu w `sim.sim_state`, albo symulator wychodzi z profilu i `connect-init` dostaje `depends_on: simulator` z warunkiem.
-- **Widoki `sim.v_truth_*`** (02 §8) nie mogą powstać w initdb przed tabelami symulatora: etap 1 tworzy je `CREATE OR REPLACE` z symulatora albo z event triggera (`postgres/README.md`).
+- **Widoki `sim.v_truth_*`** (02 §8) nie mogą powstać w initdb przed tabelami symulatora: etap 1 tworzy je `CREATE OR REPLACE` z symulatora albo z event triggera (`containers/postgres/README.md`).
 - **`pg_hba.conf`** domyślne z obrazu (`host all all all scram-sha-256`) obejmuje replikację; test `test_debezium_cannot_write` tworzy tymczasowy slot, pełne połączenie `pgoutput` sprawdzi etap 2.
 - **Heartbeat i tabela sygnałowa Debezium** (03 §7): jeśli mają leżeć w `sim`, rola `debezium` potrzebuje tam `INSERT/UPDATE`; dziś ma tylko `SELECT` na `shop`.
 - **RAM pełnego stosu** ≈ 9.5 GB przy 9.7 GB dostępnych: po etapie 3 zmierzyć i przyciąć limity Sparka i Connecta.

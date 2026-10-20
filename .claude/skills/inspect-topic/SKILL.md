@@ -33,7 +33,7 @@ curl -s -X POST localhost:8081/compatibility/subjects/olist.shop.orders-value/ve
 ```
 
 From the host, bootstrap is `localhost:9092`; from a container, `kafka:29092`.
-The project's own consumer (`kafka/consumer.py`) prints decoded events with
+The project's own consumer (`containers/kafka/consumer.py`) prints decoded events with
 validation results; use it for the "consumer decodes CDC messages" deliverable.
 
 Checklist when verifying a Debezium topic: key = PK fields only, value envelope

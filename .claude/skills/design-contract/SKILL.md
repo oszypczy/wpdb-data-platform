@@ -32,16 +32,19 @@ truth: the orchestrator, the component owner and QA all read the same file.
 ## Repo layout (agreed, create on first use)
 
 ```
-simulator/      business simulator (Python)            owner: business-simulator
-postgres/       image config + init SQL                owner: database-cdc
-connect/        Debezium Connect image + connector     owner: database-cdc
-kafka/          topics as code + AVRO consumer         owner: database-cdc
-spark/          streaming jobs, pure transforms        owner: streaming-lakehouse
-minio/          init scripts, policies                 owner: streaming-lakehouse (+devops)
-dashboard/      Streamlit app, query layer             owner: analytics-dashboard
-tests/          unit/ integration/ e2e/ + conftest     owner: qa-engineer
-docker-compose.yml, Dockerfiles, Makefile, .env.example   owner: platform-devops
-docs/design/08-operations.md                           owner: platform-devops (+qa)
+containers/<service>/   one directory per compose service, named exactly like the service
+  simulator/            business simulator (Python)            owner: business-simulator
+  postgres/             image config + init SQL                owner: database-cdc
+  connect/              Debezium Connect image + connectors    owner: database-cdc (image: platform-devops)
+  kafka/                topics as code (kafka-init)            owner: database-cdc
+  consumer/             AVRO consumer (profile tools)          owner: database-cdc
+  spark/                streaming jobs, pure transforms        owner: streaming-lakehouse
+  minio/                image built from source, init scripts  owner: streaming-lakehouse (+devops)
+  dashboard/            Streamlit app, query layer             owner: analytics-dashboard
+tests/                  unit/ integration/ e2e/ + conftest     owner: qa-engineer
+tools/                  host-side tooling (kafka-mcp), not containers
+docker-compose.yml, Makefile, pyproject.toml, .env.example      owner: platform-devops
+docs/design/08-operations.md                                   owner: platform-devops (+qa)
 ```
 
 Python: one `pyproject.toml` per component container plus one at the root for tests

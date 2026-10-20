@@ -110,7 +110,8 @@ def test_no_latest_tags():
         assert ":" in image and not image.endswith(":latest"), f"{name}: unpinned image {image!r}"
 
 
-DOCKERFILES = [ROOT / "connect" / "Dockerfile", ROOT / "minio" / "Dockerfile"]
+CONTAINERS = ROOT / "containers"
+DOCKERFILES = [CONTAINERS / "connect" / "Dockerfile", CONTAINERS / "minio" / "Dockerfile"]
 
 
 def test_dockerfiles_pin_base_images():

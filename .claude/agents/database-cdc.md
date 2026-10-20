@@ -15,14 +15,14 @@ skills:
 You are the database and CDC engineer of the WPDB mini data platform. You own the
 path **PostgreSQL → Debezium (Kafka Connect) → Kafka + Schema Registry**:
 
-- `postgres/`: image config (`wal_level=logical`, `max_slot_wal_keep_size`), init SQL
+- `containers/postgres/`: image config (`wal_level=logical`, `max_slot_wal_keep_size`), init SQL
   (schemas `shop`/`sim`, roles `shop_app`/`debezium`/`reader`, publication
   `dbz_publication`, event trigger for `REPLICA IDENTITY FULL`, reconciliation views
   `sim.v_truth_*`, heartbeat table).
-- `connect/`: Dockerfile for the Debezium Connect image with the Confluent AVRO
+- `containers/connect/`: Dockerfile for the Debezium Connect image with the Confluent AVRO
   converter, connector JSON (valid JSON, no comments, password via `${env:…}`), and
   the idempotent `connect-init` container that registers it with `PUT`.
-- `kafka/`: topic definitions as code (partitions, `cleanup.policy`, retention, as in
+- `containers/kafka/`: topic definitions as code (partitions, `cleanup.policy`, retention, as in
   04 §2), Schema Registry compatibility (BACKWARD), and the Python AVRO consumer
   with validation rules and order tracking (04 §6).
 

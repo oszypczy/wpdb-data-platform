@@ -13,7 +13,7 @@ from tests.helpers.wait import wait_until
 
 pytestmark = pytest.mark.integration
 
-TOPICS_TXT = Path(__file__).resolve().parents[2] / "kafka" / "topics.txt"
+TOPICS_TXT = Path(__file__).resolve().parents[2] / "containers" / "kafka" / "topics.txt"
 
 
 def parse_topics_txt() -> dict[str, tuple[int, dict[str, str]]]:
@@ -72,8 +72,8 @@ def test_auto_create_disabled(kafka_admin):
 
 
 def test_internal_topics_match_topics_txt(kafka_admin):
-    """04 §3 topics as code: each line of kafka/topics.txt exists with its partitions and configs,
-    and no other connect-*/_schemas topic exists."""
+    """04 §3 topics as code: each line of containers/kafka/topics.txt exists with its
+    partitions and configs, and no other connect-*/_schemas topic exists."""
     expected = parse_topics_txt()
     assert set(expected) == {"connect-configs", "connect-offsets", "connect-status", "_schemas"}
     md = kafka_admin.list_topics(timeout=10)

@@ -14,12 +14,12 @@ from tests.helpers.compose import ComposeStack
 pytestmark = pytest.mark.integration
 
 BUCKETS = ["bronze", "silver", "gold", "ops", "checkpoints"]
-DOCKERFILE = Path(__file__).resolve().parents[2] / "minio" / "Dockerfile"
+DOCKERFILE = Path(__file__).resolve().parents[2] / "containers" / "minio" / "Dockerfile"
 
 
 def pinned(arg: str) -> str:
     m = re.search(rf"^ARG {arg}=(\S+)$", DOCKERFILE.read_text(), re.M)
-    assert m, f"ARG {arg} not found in minio/Dockerfile"
+    assert m, f"ARG {arg} not found in containers/minio/Dockerfile"
     return m.group(1)
 
 

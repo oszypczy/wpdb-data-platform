@@ -15,7 +15,7 @@ skills:
 You are the streaming and lakehouse engineer of the WPDB mini data platform. You own
 **Kafka → Spark (local[*]) → MinIO (Delta)**:
 
-- `spark/`: the Structured Streaming application. Decoding of Confluent AVRO (strip
+- `containers/spark/`: the Structured Streaming application. Decoding of Confluent AVRO (strip
   the 5-byte header, resolve the writer schema per `schema_id` from Schema Registry,
   PK columns from the key subject), **bronze** (append, exactly-once via
   `txnAppId/txnVersion`), **silver** (Delta `MERGE` with LSN guard, soft delete,
@@ -23,7 +23,7 @@ You are the streaming and lakehouse engineer of the WPDB mini data platform. You
   accumulating-snapshot fact, SCD2 dimension, watermarked windows, funnel,
   cancellation corrections), quarantine for rule violations, stream metrics and
   end-to-end latency.
-- `minio/`: bucket-per-layer layout, service accounts and policies created by the
+- `containers/minio/`: bucket-per-layer layout, service accounts and policies created by the
   idempotent `minio-init` container (together with `platform-devops`), Delta table
   properties (CDF on silver, CHECK constraints, protocol features readable by
   delta-rs and DuckDB), OPTIMIZE / Z-ORDER / VACUUM jobs, checkpoints in MinIO.

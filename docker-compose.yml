@@ -39,8 +39,8 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
-      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
-      - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
+      - ./containers/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./containers/postgres/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       <<: *hc
       test: ["CMD-SHELL", "pg_isready -U postgres -d shop"]
@@ -104,8 +104,8 @@ services:
       BOOTSTRAP: kafka:29092
       TOPICS_FILE: /kafka/topics.txt
     volumes:
-      - ./kafka/topics.txt:/kafka/topics.txt:ro
-      - ./kafka/create-topics.sh:/kafka/create-topics.sh:ro
+      - ./containers/kafka/topics.txt:/kafka/topics.txt:ro
+      - ./containers/kafka/create-topics.sh:/kafka/create-topics.sh:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -150,7 +150,7 @@ services:
   # ----------------------------------------------------- Kafka Connect (Debezium)
   connect:
     build:
-      context: ./connect
+      context: ./containers/connect
     image: wpdb/connect
     container_name: connect
     restart: unless-stopped
@@ -206,8 +206,8 @@ services:
       CONNECTORS_DIR: /connect
       CONNECT_INIT_TIMEOUT: 120
     volumes:
-      - ./connect/init.sh:/scripts/init.sh:ro
-      - ./connect/connectors:/connect:ro
+      - ./containers/connect/init.sh:/scripts/init.sh:ro
+      - ./containers/connect/connectors:/connect:ro
     depends_on:
       connect:
         condition: service_healthy
@@ -220,7 +220,7 @@ services:
   # --------------------------------------------------------------------- MinIO
   minio:
     build:
-      context: ./minio
+      context: ./containers/minio
     image: wpdb/minio
     container_name: minio
     restart: unless-stopped
@@ -261,8 +261,8 @@ services:
       MINIO_AGENT_ACCESS_KEY: ${MINIO_AGENT_ACCESS_KEY:?set it in .env}
       MINIO_AGENT_SECRET_KEY: ${MINIO_AGENT_SECRET_KEY:?set it in .env}
     volumes:
-      - ./minio/init.sh:/minio/init.sh:ro
-      - ./minio/policies:/minio/policies:ro
+      - ./containers/minio/init.sh:/minio/init.sh:ro
+      - ./containers/minio/policies:/minio/policies:ro
     depends_on:
       minio:
         condition: service_healthy
@@ -275,7 +275,7 @@ services:
   # ------------------------------------------------- pipeline (profile, stages 1-5)
   simulator:
     build:
-      context: ./simulator
+      context: ./containers/simulator
     image: wpdb/simulator
     container_name: simulator
     restart: unless-stopped
@@ -303,7 +303,7 @@ services:
 
   spark:
     build:
-      context: ./spark
+      context: ./containers/spark
     image: wpdb/spark
     container_name: spark
     restart: unless-stopped
@@ -331,7 +331,7 @@ services:
 
   dashboard:
     build:
-      context: ./dashboard
+      context: ./containers/dashboard
     image: wpdb/dashboard
     container_name: dashboard
     restart: unless-stopped

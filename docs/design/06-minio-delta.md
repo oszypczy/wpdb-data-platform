@@ -6,7 +6,7 @@ Podział odpowiedzialności: [05-spark.md](05-spark.md) opisuje, *co* jest liczo
 
 ## 1. Część podstawowa
 
-- **MinIO** w compose: własny obraz `wpdb/minio` zbudowany ze źródeł z przypiętego tagu (`minio/Dockerfile`, patrz niżej „Dystrybucja MinIO”), wolumen `minio_data`, healthcheck `/minio/health/live`.
+- **MinIO** w compose: własny obraz `wpdb/minio` zbudowany ze źródeł z przypiętego tagu (`containers/minio/Dockerfile`, patrz niżej „Dystrybucja MinIO”), wolumen `minio_data`, healthcheck `/minio/health/live`.
 - **Dostęp Sparka przez S3A:** endpoint `http://minio:9000`, `fs.s3a.path.style.access=true`, `fs.s3a.connection.ssl.enabled=false`.
 - **Zapis w formacie Delta.**
 - **Dokumentacja odczytu danych** (§8): wymóg specyfikacji.
@@ -131,7 +131,7 @@ Dashboard również czyta przez delta-rs lub DuckDB, bez Sparka.
 
 Stan na 2026-10-20: MinIO zarchiwizowało repozytoria `minio/minio` i `minio/mc` (2026-04-24), a obrazy `minio/minio` i `minio/mc` zostały usunięte z Docker Hub i Quay (2026-09); `dl.min.io` zwraca 410. Specyfikacja wymaga MinIO, więc:
 
-- **Obraz `wpdb/minio`** (`minio/Dockerfile`) buduje serwer i klienta z archiwów źródłowych GitHub ostatnich tagów: `minio` `RELEASE.2025-10-15T17-29-55Z`, `mc` `RELEASE.2025-08-13T08-35-41Z` (builder `golang:1.24.13-bookworm`, `CGO_ENABLED=0`, te same `-ldflags` co w upstreamowym `Makefile`, runtime `debian:bookworm-slim` + `ca-certificates` + `curl`). Jeden obraz ma oba binaria, więc `minio-init` nie potrzebuje osobnego obrazu `mc`.
+- **Obraz `wpdb/minio`** (`containers/minio/Dockerfile`) buduje serwer i klienta z archiwów źródłowych GitHub ostatnich tagów: `minio` `RELEASE.2025-10-15T17-29-55Z`, `mc` `RELEASE.2025-08-13T08-35-41Z` (builder `golang:1.24.13-bookworm`, `CGO_ENABLED=0`, te same `-ldflags` co w upstreamowym `Makefile`, runtime `debian:bookworm-slim` + `ca-certificates` + `curl`). Jeden obraz ma oba binaria, więc `minio-init` nie potrzebuje osobnego obrazu `mc`.
 - **CVE-2026-40344** (obejście uwierzytelnienia w ostatnim wydaniu community, wymaga ważnego klucza z prawem zapisu) nie ma łatki w wersji otwartej. Ograniczenie ryzyka: porty 9000 i 9091 publikowane wyłącznie na `127.0.0.1`, konta `spark`/`dashboard` z minimalnymi politykami, root tylko dla `minio-init`. Stos jest środowiskiem laboratoryjnym na jednej maszynie, nie usługą sieciową.
 - **Fallback** (udokumentowany, nieużywany): `bitnamilegacy/minio:2025.7.23-debian-12-r5`.
 - **Konsekwencje dla czytelników Delta** (delta-rs, DuckDB; [08-operations.md](08-operations.md) §1): bez identity columns i column mapping w tabelach czytanych przez dashboard, `delta.enableDeletionVectors=false`, CDF czytany tylko przez delta-rs.

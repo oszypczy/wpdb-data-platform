@@ -10,6 +10,7 @@ Semester project (WPDB, master's studies). Design is done; implementation is in 
 - `docs/requirements/`: source material. `ProjectDescription.docx` is the official spec, `notes.txt` holds the author's own requirements, and there is an architecture diagram.
 - `docs/tutorials/`: lab tutorial PDFs, kept locally only (gitignored). Reference only: they contain deliberate bugs.
 - `data/olist/`: raw Olist CSVs; source and license are in its README.
+- `containers/<service>/`: one directory per compose service (Dockerfile, init scripts, code), named exactly like the service in `docker-compose.yml`; `tests/` is the pytest suite, `tools/` holds host-side tooling such as the Kafka MCP server.
 
 Read PDFs with `pdftotext -layout <file> -` and the docx with `textutil -convert txt -stdout <file>`.
 

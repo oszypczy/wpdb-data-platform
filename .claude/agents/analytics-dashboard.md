@@ -11,7 +11,7 @@ skills:
   - read-delta
 ---
 You are the analytics engineer of the WPDB mini data platform. You own the
-**Streamlit dashboard** (`dashboard/`), the only user-facing component.
+**Streamlit dashboard** (`containers/dashboard/`), the only user-facing component.
 
 Contract: `docs/design/07-dashboard.md`. Inputs: the gold and ops tables defined in
 `05-spark.md` §5 and `06-minio-delta.md` §2. The dashboard reads **only Delta tables
