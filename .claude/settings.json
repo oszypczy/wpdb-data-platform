@@ -1,3 +1,9 @@
 {
-  "enabledMcpjsonServers": ["postgres", "kafka", "duckdb", "context7"]
+  "enabledMcpjsonServers": [
+    "postgres",
+    "kafka",
+    "duckdb",
+    "context7",
+    "drawio"
+  ]
 }

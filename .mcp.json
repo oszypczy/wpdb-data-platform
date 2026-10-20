@@ -4,9 +4,12 @@
       "type": "stdio",
       "command": "npx",
       "args": [
-        "-y", "@bytebase/dbhub@1.5.0",
-        "--transport", "stdio",
-        "--config", "${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/dbhub.toml"
+        "-y",
+        "@bytebase/dbhub@1.5.0",
+        "--transport",
+        "stdio",
+        "--config",
+        "${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/dbhub.toml"
       ],
       "env": {
         "READER_PASSWORD": "${READER_PASSWORD:-reader}"
@@ -16,7 +19,10 @@
       "type": "stdio",
       "command": "uv",
       "args": [
-        "run", "--project", "${CLAUDE_PROJECT_DIR:-.}/tools/kafka-mcp", "kafka-mcp"
+        "run",
+        "--project",
+        "${CLAUDE_PROJECT_DIR:-.}/tools/kafka-mcp",
+        "kafka-mcp"
       ],
       "env": {
         "KAFKA_BOOTSTRAP": "${KAFKA_BOOTSTRAP:-localhost:9092}",
@@ -28,9 +34,11 @@
       "command": "uvx",
       "args": [
         "mcp-server-motherduck==1.1.0",
-        "--db-path", ":memory:",
+        "--db-path",
+        ":memory:",
         "--read-write",
-        "--init-sql", "${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/duckdb-init.sql"
+        "--init-sql",
+        "${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/duckdb-init.sql"
       ],
       "env": {
         "AWS_ACCESS_KEY_ID": "${MINIO_AGENT_ACCESS_KEY:-agent}",
@@ -41,7 +49,18 @@
     "context7": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@upstash/context7-mcp"]
+      "args": [
+        "-y",
+        "@upstash/context7-mcp"
+      ]
+    },
+    "drawio": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@drawio/mcp@1.5.0"
+      ]
     }
   }
 }

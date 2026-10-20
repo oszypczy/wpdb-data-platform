@@ -23,7 +23,8 @@ specjalizację, więc agenci nie wchodzą sobie w kod.
 | `database-cdc` | specjalista od baz danych i CDC | PostgreSQL, Debezium, Kafka + Schema Registry ([02](02-postgresql.md), [03](03-debezium.md), [04](04-kafka.md)) | 1–2 | `postgres`, `kafka`, `context7` |
 | `streaming-lakehouse` | inżynier danych (Spark, Delta) | Spark bronze → silver → gold, MinIO/Delta ([05](05-spark.md), [06](06-minio-delta.md)) | 3–4 | `kafka`, `duckdb`, `context7` |
 | `analytics-dashboard` | inżynier analityki | dashboard Streamlit ([07](07-dashboard.md)) | 5 | `duckdb`, `context7` |
-| `platform-devops` | integrator / DevOps | `docker-compose.yml`, obrazy, kontenery startowe, healthchecki, macierz wersji, `08-operations.md` | 0 i 6 | `context7` |
+| `platform-devops` | integrator / DevOps | `docker-compose.yml`, obrazy, kontenery startowe, healthchecki, macierz wersji, `08-operations.md` | 0 i 6 | `drawio` | `@drawio/mcp@1.5.0` (oficjalny, stdio) | diagramy architektury: otwieranie XML w edytorze, `search_shapes`, odczyt i zapis stron w plikach `.drawio` (`get_page`/`set_page`) | źródło diagramu w repo: `docs/design/architecture.drawio`; eksport PNG lokalnym CLI `drawio -x` |
+| `context7` |
 | `qa-engineer` | niezależny QA | `tests/` na trzech poziomach, wstrzykiwanie awarii, uzgadnianie Postgres ↔ Delta, macierz pokrycia | każdy | `postgres`, `kafka`, `duckdb` |
 
 Decyzje:

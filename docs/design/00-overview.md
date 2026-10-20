@@ -23,6 +23,9 @@ Olist CSV ─► Business System ─► PostgreSQL ─► Debezium ─► Kafka 
 
 ## Komponenty
 
+Diagram C4 na poziomie kontenerów: [architecture.drawio](architecture.drawio) (PNG: [architecture.png](architecture.png)); diagram ogólny z wymagań: `../requirements/ArchitekturaProjekt.drawio.pdf`.
+
+
 Szczegóły każdego komponentu znajdują się w osobnym dokumencie. Tutaj są tylko najważniejsze punkty.
 
 | # | Komponent | Podstawa (wymagane) | Najważniejsze rozszerzenia |

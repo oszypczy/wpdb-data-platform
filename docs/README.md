@@ -15,6 +15,7 @@ Numeracja odpowiada kolejności w przepływie danych.
 | Dokument | Komponent | Status |
 |---|---|---|
 | [00-overview.md](design/00-overview.md) | Całość: decyzje, przepływ, plan prac | ✅ |
+| [architecture.drawio](design/architecture.drawio) / [.png](design/architecture.png) | Diagram C4 (poziom kontenerów): wszystkie kontenery, protokoły i kierunki przepływu | ✅ |
 | [01-business-system.md](design/01-business-system.md) | Symulator sklepu (Python), zweryfikowany na danych Olist | ✅ |
 | [02-postgresql.md](design/02-postgresql.md) | PostgreSQL | ✅ |
 | [03-debezium.md](design/03-debezium.md) | Debezium (Kafka Connect) | ✅ |
