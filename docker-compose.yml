@@ -272,14 +272,16 @@ services:
           memory: 128m
     networks: [wpdb]
 
-  # ------------------------------------------------- pipeline (profile, stages 1-5)
+  # ------------------------------------------------------------ business simulator
+  # Stage 1: runs by default (the system produces data end to end after every stage).
+  # Healthy only after the preload (phase replay/done), so a stage-2 connect-init can
+  # depend on it to snapshot the history before SIM_START (01 §4, 08 §14).
   simulator:
     build:
       context: ./containers/simulator
     image: wpdb/simulator
     container_name: simulator
     restart: unless-stopped
-    profiles: [pipeline]
     environment:
       PG_HOST: postgres
       PG_PORT: 5432
@@ -288,19 +290,29 @@ services:
       PG_PASSWORD: ${SHOP_APP_PASSWORD:?set it in .env}
       SIM_SPEED: ${SIM_SPEED:-1440}
       MAX_EVENTS_PER_SEC: ${MAX_EVENTS_PER_SEC:-20}
-      SIM_START: ${SIM_START:-2017-01-01}
-      SIM_END: ${SIM_END:-2018-08-31}
+      SIM_START: ${SIM_START:-2017-01-05}
+      SIM_END: ${SIM_END:-2017-03-31}
+      SIM_DATA_DIR: /data/olist
+      SIM_TRUTH_VIEWS: /app/sql/truth-views.sql
     volumes:
       - ./data/olist:/data/olist:ro
+      # single source of the reconciliation views (02 §8), applied by the simulator as shop_app
+      - ./containers/postgres/sql/truth-views.sql:/app/sql/truth-views.sql:ro
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      <<: *hc
+      # heartbeat file fresh (< 30 s) and phase in (replay, done); see healthcheck.py
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      start_period: 120s
     deploy:
       resources:
         limits:
           memory: 512m
     networks: [wpdb]
 
+  # ------------------------------------------------- pipeline (profile, stages 3-5)
   spark:
     build:
       context: ./containers/spark

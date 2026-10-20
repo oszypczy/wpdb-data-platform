@@ -33,7 +33,7 @@ Co to daje:
 - **Przy DELETE** warstwa gold może od razu odjąć przychód właściwej kategorii i sprzedawcy.
 - **Przy UPDATE** zamówienia widać przejście `before.status → after.status` (np. `approved → shipped`). Z tego Spark liczy lejek statusów i czasy etapów bez sięgania do historii.
 
-**Automatyzacja dla dynamicznych tabel:** event trigger (`ON ddl_command_end`) wykonuje `ALTER TABLE … REPLICA IDENTITY FULL` dla każdej nowej tabeli w schemacie `shop`.
+**Automatyzacja dla dynamicznych tabel:** event trigger `shop_replica_identity_full` (`ON ddl_command_end`, tagi `CREATE TABLE`, `CREATE TABLE AS`, `SELECT INTO`; `containers/postgres/initdb/10-event-trigger.sql`) wykonuje `ALTER TABLE … REPLICA IDENTITY FULL` dla każdej nowej tabeli w schemacie `shop`. Funkcja działa z uprawnieniami roli, która wydała DDL (`shop_app` jest właścicielem tabeli), więc nie jest `SECURITY DEFINER`; tabele w `sim` zachowują identyfikację domyślną, bo nie są publikowane. Test: `test_postgres.py::test_new_table_in_shop_gets_replica_identity_full`.
 
 **Kompromis:** większy WAL. Przy ruchu rzędu dziesiątek zdarzeń na sekundę jest to pomijalne.
 
@@ -93,6 +93,17 @@ COMMIT;
 ## 7. Rozszerzenie: indeksy i ograniczenia z detekcji
 
 - Indeks na każdej wykrytej kolumnie FK, np. `order_items(order_id)`. Przy anulacji `DELETE … WHERE order_id=…` i sprawdzanie FK nie skanują całej tabeli.
+- **Reguła (sprawdzana testem):** kolumny każdego FK muszą być **wiodącymi** kolumnami jakiegoś indeksu tabeli podrzędnej. Indeks PK lub unikalny wystarcza, jeśli zaczyna się od tych kolumn. Dla FK z [01-business-system.md](01-business-system.md) §3:
+
+  | FK | Pokrycie |
+  |---|---|
+  | `order_items.order_id` | PK `(order_id, order_item_id)`: bez dodatkowego indeksu |
+  | `order_payments.order_id` | PK `(order_id, payment_sequential)`: bez dodatkowego indeksu |
+  | `order_reviews.order_id` | PK `(review_id, order_id)` **nie** pokrywa (druga kolumna): potrzebny `order_reviews(order_id)` |
+  | `orders.customer_id` | potrzebny `orders(customer_id)` (unikalny w danych, ale symulator nie musi tego zakładać) |
+  | `order_items.product_id`, `order_items.seller_id` | potrzebne `order_items(product_id)`, `order_items(seller_id)` |
+
+  Testy: `test_postgres.py::test_every_fk_column_has_a_leading_index` (reguła dla wszystkich FK w `shop`) i `::test_delete_order_items_by_order_id_uses_index` (plan `DELETE` z `EXPLAIN`, z `enable_seqscan=off`, bo na małej tabeli planer wybrałby skan sekwencyjny mimo indeksu).
 - Opcjonalnie `CHECK` dla kolumn o małej liczbie wartości (np. `order_status`), wykrytych z danych.
 
 ## 8. Rozszerzenie: uzgadnianie danych (reconciliation)
@@ -108,9 +119,22 @@ GROUP BY o.order_status;
 
 Test e2e (§10) porównuje je z tabelami silver w Delta. Zgodność dowodzi, że CDC, Kafka i `MERGE` w Sparku nie zgubiły ani nie zdublowały żadnego wiersza.
 
+**Realizacja (etap 1):** widoki nie mogą powstać w initdb, bo tabele `shop.*` tworzy dopiero symulator. Leżą w `containers/postgres/sql/truth-views.sql` (wyłącznie `CREATE OR REPLACE`, każda kolumna z jawnym typem, więc plik jest wykonywalny wielokrotnie), a **symulator wykonuje ten plik jako `shop_app` zaraz po utworzeniu tabel** (jedna paczka SQL, np. `conn.execute(path.read_text())`). `reader` widzi je dzięki domyślnym uprawnieniom w `sim`. Wymagane tabele: `shop.customers`, `shop.orders`, `shop.order_items`, `shop.order_payments`, `shop.order_reviews` z nazwami kolumn z nagłówków CSV.
+
+| Widok | Kolumny | Treść |
+|---|---|---|
+| `sim.v_truth_row_counts` | `table_name text, row_count bigint` | dokładne `count(*)` każdej tabeli w `shop` (z katalogu, więc obejmuje tabele dodane później) |
+| `sim.v_truth_orders` | `order_status text, orders, items bigint, revenue, freight numeric(14,2)` | per status; zamówienia bez pozycji liczone z 0 |
+| `sim.v_truth_totals` | `orders, customers, order_items, order_payments, order_reviews bigint, revenue, freight, payments numeric(14,2)` | jeden wiersz KPI |
+| `sim.v_truth_revenue_by_state` | `customer_state text, orders, items bigint, revenue numeric(14,2)` | złączenie z klientem (gold `dim_geography`) |
+| `sim.v_truth_payments` | `payment_type text, payments bigint, value numeric(14,2)` | per typ płatności |
+| `sim.v_truth_order_lifecycle` | `orders, approved, shipped, delivered, late bigint` | liczba zamówień z wypełnionym kamieniem milowym: dowód, że `UPDATE` doszły do silver/gold |
+
+Testy: `test_postgres.py::test_truth_views_exact_on_known_data` wykonuje plik dwa razy jako `shop_app` w jednorazowym kontenerze (ten sam obraz i initdb, `tests/helpers/postgres.py::InitdbProbe`) na znanym zestawie danych (`OLIST_FIXTURE_DATA`) i sprawdza dokładne wartości każdego widoku; `::test_truth_views_apply_and_reconcile` sprawdza na działającym stosie, że symulator utworzył widoki o ustalonych kolumnach, `reader` je czyta, a `v_truth_row_counts` równa się bezpośrednim `count(*)` w jednym snapshocie `REPEATABLE READ`.
+
 ## 9. Rozszerzenie: konfiguracja jako kod i strojenie
 
-- **Skrypty w `/docker-entrypoint-initdb.d/`:** schematy, role, publikacja, event trigger i widoki. Wykonują się przy pustym wolumenie, więc `docker compose down -v && docker compose up` zawsze daje identyczny stan.
+- **Skrypty w `/docker-entrypoint-initdb.d/`:** role, schematy, publikacja i event trigger (`containers/postgres/initdb/`). Wykonują się przy pustym wolumenie, więc `docker compose down -v && docker compose up` zawsze daje identyczny stan. Widoki uzgadniania są poza initdb (§8). Test `test_postgres.py::test_initdb_twice_gives_identical_state` uruchamia initdb w dwóch jednorazowych kontenerach z tego samego obrazu i porównuje stan katalogu (role, schematy, domyślne uprawnienia, publikacja, event trigger, ustawienia) między nimi i z działającym stosem.
 - **Strojenie pod laptopa:** `shared_buffers`, `max_wal_size`, `wal_compression=on`, z uzasadnieniem w komentarzach.
 
 ## 10. Testy
@@ -137,6 +161,6 @@ Test e2e (§10) porównuje je z tabelami silver w Delta. Zgodność dowodzi, że
 
 ## Do weryfikacji przy implementacji
 
-- Macierz zgodności wybranej wersji Debezium z PostgreSQL 16. `FOR TABLES IN SCHEMA` wymaga PG 15 lub nowszego.
-- Uprawnienia wymagane przez Debezium przy publikacji utworzonej wcześniej (`publication.autocreate.mode=disabled`) i przy snapshocie.
-- Zachowanie Debezium po unieważnieniu slotu (`max_slot_wal_keep_size`) i dobór `snapshot.mode`.
+- **Rozstrzygnięte (etap 1):** zgodność wersji. Przypięte `postgres:16.15` i `quay.io/debezium/connect:3.6.3.Final`; Debezium 3.6 wspiera PostgreSQL 14–18 ([debezium.io/releases/3.6](https://debezium.io/releases/3.6/), macierz w [08-operations.md](08-operations.md) §1). `CREATE PUBLICATION … FOR TABLES IN SCHEMA` istnieje od PG 15 i wymaga superużytkownika, dlatego publikację tworzy initdb (`02-publication.sql`), a `pg_publication_namespace` jest sprawdzana testem `test_postgres.py::test_publication_covers_schema_shop`.
+- **Rozstrzygnięte (etap 1):** uprawnienia Debezium przy `publication.autocreate.mode=disabled`. Według dokumentacji konektora 3.6 (sekcja „Setting up permissions” i opis `publication.autocreate.mode`) w trybie `disabled` konektor nie tworzy ani nie zmienia publikacji, a jedynie sprawdza, że istnieje (brak → wyjątek i stop). Rola potrzebuje więc tylko `LOGIN`, `REPLICATION` (slot + `pgoutput`), `CONNECT` do bazy, `USAGE` na schemacie `shop` i `SELECT` na tabelach (snapshot `initial`). `CREATE` na bazie i własność tabel są wymagane wyłącznie dla trybów `all_tables`/`filtered`/`no_tables`, których nie używamy. Dokładnie taki zestaw daje `00-roles.sh` i `01-schemas.sql` (`ALTER DEFAULT PRIVILEGES … GRANT SELECT` obejmuje tabele tworzone później przez `shop_app`); testy `test_debezium_cannot_write` i `test_sim_schema_privileges`. Pełne połączenie `pgoutput` potwierdzi etap 2.
+- Zachowanie Debezium po unieważnieniu slotu (`max_slot_wal_keep_size`) i dobór `snapshot.mode`: etap 2.

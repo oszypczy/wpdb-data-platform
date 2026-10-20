@@ -2,7 +2,7 @@
 
 Ten dokument opisuje, jak cały system wstaje jednym `docker compose up`, jak się zachowuje przy awariach, jak go resetować i jak uruchamiać testy. Właściciel: `platform-devops` (razem z `qa-engineer` dla sekcji o testach). Kontrakt nazw usług i portów jest w skillu `stack-ops` (`.claude/skills/stack-ops/SKILL.md`); ten dokument i skill zmieniają się razem.
 
-Stan: **etap 0 ukończony 2026-10-20** (infrastruktura: Postgres, Kafka, Schema Registry, Connect, MinIO, kontenery startowe, harness testów, CI). Sekcje dotyczące potoku (symulator, Spark, dashboard, testy e2e z awariami) są uzupełniane w kolejnych etapach.
+Stan: **etap 0 ukończony 2026-10-20** (infrastruktura: Postgres, Kafka, Schema Registry, Connect, MinIO, kontenery startowe, harness testów, CI); **etap 1 (symulator + PostgreSQL) zaimplementowany 2026-10-20**, usługa `simulator` startuje domyślnie. Sekcje dotyczące dalszego potoku (Spark, dashboard, testy e2e z awariami) są uzupełniane w kolejnych etapach.
 
 ## 1. Macierz wersji
 
@@ -35,11 +35,12 @@ Zasady: żadnego `latest` (test `test_compose_file.py::test_no_latest_tags`); we
 `docker compose up -d --build` uruchamia wszystko naraz; kolejność wymusza `depends_on` z warunkiem `service_healthy` (usługi) lub `service_completed_successfully` (kontenery startowe). Nigdzie nie ma `sleep`.
 
 ```
+postgres ──► simulator (healthy = preload zakończony)
 postgres ──────────────────────────────────────────────┐
 kafka ──► kafka-init ──► schema-registry ──────────────┼──► connect ──► connect-init
 minio ──► minio-init                                   │
-                              (profil pipeline, etapy 1–5)
-postgres ──► simulator        kafka + schema-registry + minio-init ──► spark        minio-init ──► dashboard
+                              (profil pipeline, etapy 3–5)
+kafka + schema-registry + minio-init ──► spark        minio-init ──► dashboard
 ```
 
 | Krok | Usługa | Czeka na | Healthy, gdy |
@@ -50,6 +51,7 @@ postgres ──► simulator        kafka + schema-registry + minio-init ──�
 | 3 | `schema-registry` | `kafka` healthy, `kafka-init` exit 0 | `GET /subjects` |
 | 4 | `connect` | `kafka`, `schema-registry`, `postgres` healthy; `kafka-init` exit 0 | `GET /connectors` |
 | 5 | `connect-init` | `connect` healthy | exit 0 (bez plików w `containers/connect/connectors/`: „no connectors to register”) |
+| 2 | `simulator` | `postgres` healthy; `data/olist/*.csv` na hoście (`make up` wywołuje `make data`) | `healthcheck.py`: plik heartbeat < 30 s **i** faza `replay`/`done` (po preloadzie; `start_period` 120 s); w etapie 2 `connect-init` ma dostać `depends_on: simulator: service_healthy` (§14) |
 
 **Zmierzony czas do „all services healthy”** (Apple Silicon, 8 CPU, 9.7 GB RAM dla Dockera, obrazy już zbudowane i pobrane): patrz §2.1. Budżet w teście `test_stack.py::test_fresh_stack_healthy_within_budget`: ≤ 180 s od `down -v`.
 
@@ -58,10 +60,10 @@ postgres ──► simulator        kafka + schema-registry + minio-init ──�
 | Scenariusz | Czas |
 |---|---|
 | pierwszy build obrazów `wpdb/minio` (Go ze źródeł, cache BuildKit) i `wpdb/connect` | 1 min 54 s |
-| `make reset && make up` (pobrane obrazy, zbudowane obrazy, puste wolumeny) | **47 s** do „all services healthy” (initdb Postgresa, format KRaft, 3 kontenery startowe); test `test_fresh_stack_healthy_within_budget` przeszedł z budżetem 180 s |
+| `make reset && make up` (pobrane obrazy, zbudowane obrazy, puste wolumeny) | **47 s** do „all services healthy” (initdb Postgresa, format KRaft, 3 kontenery startowe); test `test_fresh_stack_healthy_within_budget` przeszedł z budżetem 180 s. **Z symulatorem (etap 1): 48 s** (wczytanie CSV + detekcja + budowa zdarzeń ≈ 10 s, init jednej transakcji 0,2 s, preload 2016 r. 0,07 s) |
 | `make down && make up` (istniejące wolumeny) | **47 s**: czas zdominowany przez `start_period` i interwały healthchecków (10 s), nie przez pracę kontenerów |
-| `make test-integration` na działającym stosie | 32 s (31 testów; 1 pomijany bez `WPDB_FRESH=1`) |
-| `WPDB_FRESH=1 make test-integration` (`down -v` + start + 31 testów) | 69 s |
+| `make test-integration` na działającym stosie | ok. 2 min 50 s (50 testów po etapie 1, w tym testy symulatora z restartami kontenera; 1 pomijany bez `WPDB_FRESH=1`); w etapie 0 było 32 s / 31 testów |
+| `make test-integration-fresh` (`down -v` + start + wszystkie testy) | ok. 3 min 30 s (etap 0: 69 s) |
 
 ## 3. Healthchecki
 
@@ -74,6 +76,7 @@ Tabela jest kopią kontraktu ze skillu `stack-ops`; wszystkie healthchecki mają
 | `schema-registry` | `schema-registry:8081` | `127.0.0.1:8081` | `GET :8081/subjects` przez `python3 -c "urllib.request.urlopen(...)"` (obraz `cp-schema-registry` nie ma `curl`; `urlopen` rzuca wyjątek przy HTTP ≥ 400, jak `curl -f`) |
 | `connect` | `connect:8083` | `127.0.0.1:8083` | `curl -sf :8083/connectors` |
 | `minio` | `minio:9000` (API), `minio:9001` (konsola) | `127.0.0.1:9000`, `127.0.0.1:9091` | `curl -sf :9000/minio/health/live` |
+| `simulator` | – | – | `python /app/healthcheck.py`: heartbeat `/tmp/simulator/heartbeat` < 30 s i faza `replay`/`done` (01 §5); `start_period` 120 s |
 | `spark` (etap 3) | – | `127.0.0.1:4040` | ustala etap 3 |
 | `dashboard` (etap 5) | – | `127.0.0.1:8501` | `curl -f :8501/_stcore/health` |
 | `kafka-init`, `minio-init`, `connect-init` | – | – | kod wyjścia 0 |
@@ -98,7 +101,7 @@ Ponowne uruchomienie jednego kontenera startowego: `docker compose up -d --force
 
 ## 5. Awarie per kontener
 
-Usługi długotrwałe mają `restart: unless-stopped`, więc po `docker kill` Docker sam je podnosi; kontenery startowe mają `restart: "no"`. Zasada systemu: każdy stan jest w wolumenie lub w Kafce, a nie w kontenerze.
+Usługi długotrwałe mają `restart: unless-stopped`; kontenery startowe mają `restart: "no"`. Zasada systemu: każdy stan jest w wolumenie lub w Kafce, a nie w kontenerze. **Uwaga (zmierzone w etapie 1):** po `docker kill` (SIGKILL) Docker traktuje kontener z `unless-stopped` jak zatrzymany ręcznie i **nie** restartuje go; polityka działa przy OOM, błędzie procesu i restarcie demona. Testy awarii robią więc `docker compose kill <usługa>` + `docker compose up -d <usługa>` (skill `fault-injection`).
 
 | Umiera | Co się dzieje | Kto wznawia | Test (etap) |
 |---|---|---|---|
@@ -108,7 +111,7 @@ Usługi długotrwałe mają `restart: unless-stopped`, więc po `docker kill` Do
 | `connect` | zdarzenia nie płyną; slot w Postgresie trzyma WAL (limit `max_slot_wal_keep_size=2GB`) | Docker restartuje; Debezium wznawia od offsetu z `connect-offsets`, slot się domyka; dostarczanie co najmniej raz + idempotentny MERGE w Sparku | e2e „kill connect” (03 §11), etap 6 |
 | `minio` | Spark nie może zapisać; ponawia (S3A retry); dane w `minio_data` | Docker restartuje | e2e „restart MinIO” (06 §11), etap 6 |
 | `spark` | przetwarzanie staje; checkpointy w kubełku `checkpoints`, więc kontener jest bezstanowy | Docker restartuje; strumienie wznawiają z checkpointów | e2e (06 §11), etap 6 |
-| `simulator` | brak nowych zdarzeń; zegar w `sim.sim_state` zapisany w tej samej transakcji co dane | Docker restartuje; wznowienie bez duplikatów (01 §6) | e2e, etap 1/6 |
+| `simulator` | brak nowych zdarzeń; kursor w `sim.sim_state` zapisany w tej samej transakcji co dane | `docker compose up -d simulator`; wznowienie od kursora bez duplikatów i strat (01 §5) | integracyjny: `test_simulator.py::test_kill_and_restart_resumes_from_sim_state_without_duplicates` ✅; e2e z uzgadnianiem silver: etap 6 |
 | kontener startowy (kod ≠ 0) | `depends_on … service_completed_successfully` blokuje zależne usługi; `wait-healthy.sh` kończy się `FAILED: <nazwa> exited <kod>` | człowiek: `docker compose logs <nazwa>`, poprawka, `--force-recreate --no-deps` | integracyjny (idempotencja) |
 
 Ograniczenia zasobów (`deploy.resources.limits.memory`) chronią maszynę przed jednym kontenerem, który zjada całą pamięć; po przekroczeniu limitu kontener dostaje OOM-kill i `restart` go podnosi.
@@ -136,7 +139,7 @@ Limity z `docker-compose.yml` (Docker Desktop ma 9.7 GB):
 | `minio` | 512 MB | |
 | kontenery startowe | 128–512 MB | krótkotrwałe |
 | **etap 0 razem** | **≈ 5.8 GB** (5.0 GB usługi + 0.77 GB kontenery startowe, które żyją sekundy) | |
-| `simulator` | 512 MB | etap 1 |
+| `simulator` | 512 MB | zmierzone 240–250 MB RSS (okno domyślne), ok. 380 MB przy pełnej historii |
 | `spark` | 3 GB | etap 3; `local[*]` |
 | `dashboard` | 512 MB | etap 5 |
 | **pełny stos** | **≈ 9.8 GB** (≈ 9.0 GB bez kontenerów startowych) | na granicy 9.7 GB; w etapie 3 limit Sparka i heap Connecta do przycięcia po pomiarze |
@@ -150,7 +153,7 @@ Wszystkie zmienne są w `.env.example` z komentarzem; `make up` kopiuje go do `.
 | Postgres | `POSTGRES_PASSWORD`, `SHOP_APP_PASSWORD`, `DEBEZIUM_DB_PASSWORD`, `READER_PASSWORD` | initdb (role), symulator, Connect (`${env:DEBEZIUM_DB_PASSWORD}`), testy i MCP (`reader`) |
 | MinIO | `MINIO_ROOT_USER/PASSWORD`, `MINIO_SPARK_ACCESS_KEY/SECRET_KEY`, `MINIO_DASHBOARD_ACCESS_KEY/SECRET_KEY`, `MINIO_AGENT_ACCESS_KEY/SECRET_KEY` (tylko odczyt, MCP `duckdb` i testy) | `minio`, `minio-init`, Spark, dashboard, testy, MCP `duckdb` |
 | Kafka | `KAFKA_CLUSTER_ID` | formatowanie wolumenu KRaft (stałe ID = broker wstaje na istniejących danych) |
-| Symulator | `SIM_SPEED`, `MAX_EVENTS_PER_SEC`, `SIM_START`, `SIM_END` | etap 1 |
+| Symulator | `SIM_SPEED`, `MAX_EVENTS_PER_SEC`, `SIM_START`, `SIM_END` (domyślnie 1440 / 20 / 2017-01-05 / 2017-03-31, 01 §4) | `simulator`; e2e nadpisują je przy starcie stosu |
 
 Pułapka compose: w `command:`/`entrypoint:` `${VAR}` jest podstawiane z `.env` hosta przy parsowaniu; wartość z kontenera wymaga `$$VAR`. Test `test_compose_file.py::test_commands_use_double_dollar`.
 
@@ -209,7 +212,34 @@ Status: ✅ przechodzi, ⏳ zaplanowany (etap). Wiersze etapu 0 z planu `qa-engi
 | 06 §2 / 09 §3 | konto `agent` (MCP `duckdb`, testy) czyta każdy kubełek, nie zapisuje ani nie usuwa | integracyjny | `test_minio.py::test_agent_account_read_only_everywhere` | ✅ |
 | 06 §12, 08 §13 | MinIO i mc zbudowane z przypiętych tagów (`--version`) | integracyjny | `test_minio.py::test_server_version_matches_pinned_tag` | ✅ |
 | 08 §13 | porty MinIO tylko na `127.0.0.1` | integracyjny | `test_minio.py::test_api_bound_to_localhost_only` | ✅ |
-| 02 §2, §10 | nowa tabela w `shop` → `REPLICA IDENTITY FULL` (event trigger) | integracyjny | etap 1 (`database-cdc`) | ⏳ |
+| 02 §2, §10 | nowa tabela w `shop` (`CREATE TABLE`, `CREATE TABLE AS`) → `REPLICA IDENTITY FULL` (event trigger), obecna w `dbz_publication`; tabela w `sim` zachowuje identyfikację domyślną | integracyjny | `test_postgres.py::test_new_table_in_shop_gets_replica_identity_full` | ✅ |
+| 02 §9, §10 | skrypty initdb na pustym wolumenie, dwa razy → identyczny stan (role, schematy, domyślne uprawnienia, publikacja, event trigger, ustawienia), równy stanowi stosu | integracyjny | `test_postgres.py::test_initdb_twice_gives_identical_state` (dwa jednorazowe kontenery `postgres:16.15`, `tests/helpers/postgres.py::InitdbProbe`) | ✅ |
+| 02 §8 | `sql/truth-views.sql` wykonywalny wielokrotnie jako `shop_app`; widoki `sim.v_truth_*` dokładne na znanym zestawie danych; event trigger obejmuje tabele z initdb | integracyjny | `test_postgres.py::test_truth_views_exact_on_known_data` (jednorazowy kontener `InitdbProbe`) | ✅ |
+| 02 §8 | na stosie symulator utworzył widoki `sim.v_truth_*` o ustalonych kolumnach, czytelne dla `reader`, zgodne z `count(*)` tabel w jednym snapshocie | integracyjny | `test_postgres.py::test_truth_views_apply_and_reconcile` | ✅ |
+| 02 §7 | kolumny każdego FK w `shop` są wiodącymi kolumnami indeksu | integracyjny | `test_postgres.py::test_every_fk_column_has_a_leading_index` | ✅ |
+| 02 §7, §10 | `DELETE FROM order_items WHERE order_id=…` używa indeksu | integracyjny | `test_postgres.py::test_delete_order_items_by_order_id_uses_index` | ✅ |
+| 01 §3, §8 | detekcja typów (zip → TEXT, puste → NULL, kwoty → NUMERIC(10,2), BOM, TIMESTAMP/BIGINT/mieszane) | unit | `tests/unit/test_simulator_schema.py::test_zip_code_with_leading_zero_is_text`, `::test_integer_column_with_empty_values_is_nullable_integer`, `::test_amount_is_numeric_10_2`, `::test_timestamp_bigint_mixed_and_empty_columns`, `::test_bom_does_not_break_the_header`, `::test_multiline_quoted_fields_and_width_errors`, `::test_table_names_from_file_names` | ✅ |
+| 01 §3, §8 | detekcja PK (`orders` → `order_id`; pary dla items/payments/reviews; tabela bez `*_id`) | unit | `test_simulator_schema.py::test_pk_orders_prefers_order_id_over_unique_customer_id`, `::test_pk_reviews_is_pair_because_review_id_is_not_unique`, `::test_pk_items_and_payments_are_pairs`, `::test_pk_without_id_column_falls_back_to_first_unique_column` | ✅ |
+| 01 §3, §8 | detekcja FK: 6 przyjętych, `products → translation` odrzucony (2 brakujące) | unit | `test_simulator_schema.py::test_fk_accepts_orders_customer_id_and_rejects_products_translation` | ✅ |
+| 01 §3, 02 §7 | DDL z typami/PK/FK; dokładnie 4 dodatkowe indeksy FK; rodzice przed dziećmi | unit | `test_simulator_schema.py::test_ddl_has_detected_types_keys_and_fk_indexes`, `::test_creation_order_puts_parents_first` | ✅ |
+| 01 §3 | cała tabela §3 na prawdziwych danych (`data/olist`) | unit, `slow` | `test_simulator_schema.py::test_real_data_gives_the_schema_of_the_design_doc` (pomijany bez `make data`) | ✅ |
+| 01 §4, §8 | zamówienie → c, u, u, u, c(review); daty przyszłe NULL w INSERT | unit | `tests/unit/test_simulator_events.py::test_delivered_order_gives_create_update_update_update_review` | ✅ |
+| 01 §4, §8 | normalizacja czasu (wysyłka przed akceptacją, brak daty, recenzja przed zakupem) | unit | `test_simulator_events.py::test_shipment_before_approval_is_moved_to_the_approval_time`, `::test_missing_step_date_skips_the_step`, `::test_review_before_purchase_is_moved_to_the_purchase_time`, `::test_review_after_purchase_keeps_its_time` | ✅ |
+| 01 §4, §8 | statusy końcowe (`canceled` + DELETE, `invoiced`, `canceled` po dostawie, `delivered` bez daty, `shipped`/`created`/`approved`), opóźnienie deterministyczne 1–3 dni | unit | `test_simulator_events.py::test_canceled_order_updates_status_and_deletes_its_items`, `::test_invoiced_order_stays_invoiced_without_delete`, `::test_canceled_after_delivery_and_delivered_without_delivery_date`, `::test_shipped_and_created_orders_end_at_their_last_step`, `::test_final_status_delay_is_deterministic_and_bounded` | ✅ |
+| 01 §4, §5 | porządek `(czas, order_id, krok)`, kursor wznawiania, podział preload/replay, czysty model stanu | unit | `test_simulator_events.py::test_event_stream_is_sorted_and_resumes_strictly_after_the_cursor`, `::test_split_window_preload_before_start_and_replay_inside`, `::test_summarize_is_the_state_an_uninterrupted_run_produces` | ✅ |
+| 01 §4, §8 | limit tempa: zegar zwalnia w szczycie, ≤ `MAX_EVENTS_PER_SEC`, nic nie ginie; zegar ×SIM_SPEED; limiter | unit | `tests/unit/test_simulator_clock.py::test_backpressure_caps_the_rate_holds_the_clock_back_and_loses_nothing`, `::test_sim_clock_runs_speed_times_faster_than_wall_time`, `::test_rate_limiter_paces_row_changes`, `::test_pacer_waits_for_the_simulated_clock_when_ahead_of_schedule` | ✅ |
+| 01 §4, §9 | domyślne okno i tempo małe; parsowanie granic; błędne wartości odrzucone | unit | `test_simulator_clock.py::test_config_defaults_are_a_short_window_at_a_low_rate`, `::test_config_parses_bounds_and_rejects_bad_values` | ✅ |
+| 08 §1 | `containers/simulator/Dockerfile` z dokładnym tagiem; usługa `simulator` ma healthcheck | unit | `test_compose_file.py::test_dockerfiles_pin_base_images`, `::test_every_long_running_service_has_healthcheck_and_restart_policy` | ✅ |
+| 01 §3, §8; 02 §2, §7, §8 | 8 tabel z dokładnymi kolumnami/typami, PK, FK, 4 indeksy FK, `REPLICA IDENTITY FULL`, katalogi 32 951/3 095/71, widoki `sim.v_truth_*`, wiersz `sim.sim_state` | integracyjny | `tests/integration/test_simulator.py::test_tables_created_with_detected_types_pks_fks_and_indexes` | ✅ |
+| 01 §5 | kontener zdrowy, `healthcheck.py` = 0, heartbeat niesie fazę | integracyjny | `test_simulator.py::test_healthcheck_reports_the_phase` | ✅ |
+| 01 §8, 02 §6 | przerwanie zakupu: właściwy writer (`Database.apply`) zabity `SIGKILL` na ostatniej instrukcji transakcji (blokada wiersza `sim_state` trzymana przez test) i błąd na ostatnim INSERT → brak połowicznego zamówienia, kursor bez zmian | integracyjny | `test_simulator.py::test_writer_killed_before_its_last_statement_leaves_no_half_order`, `::test_purchase_failing_on_its_last_statement_is_rolled_back_entirely` | ✅ |
+| 01 §2 | tabele `shop.*` bez wiersza `sim.sim_state` → odmowa startu, nic nie tworzone | integracyjny | `test_simulator.py::test_refuses_to_start_when_tables_exist_without_a_state_row` | ✅ |
+| 01 §5 | `SIGTERM` (`compose stop`) → kod 0 po bieżącej transakcji, kursor spójny, `up -d` wznawia bez duplikatów | integracyjny, `slow` | `test_simulator.py::test_sigterm_stops_after_the_current_transaction_and_restart_resumes` | ✅ |
+| 01 §5 | nieświeży heartbeat (proces `SIGSTOP`) → `healthcheck.py` = 1 i nieudane sprawdzenia Dockera; `SIGCONT` → zdrowy | integracyjny | `test_simulator.py::test_stale_heartbeat_fails_the_healthcheck` | ✅ |
+| 01 §4, §9 | zmieniony `SIM_START` przy restarcie ignorowany z ostrzeżeniem, okno w `sim_state` bez zmian | integracyjny, `slow` | `test_simulator.py::test_changed_sim_start_on_restart_is_ignored_with_a_warning` | ✅ |
+| 01 §4, §9 | po `SIM_END` faza `done`: kontener bezczynny i zdrowy; późniejszy `SIM_END` + restart wznawia od kursora | e2e (własny stos, okno kilku dni) | etap 6, `tests/e2e/` | ⏳ |
+| 01 §5 | stan bazy = preload + zdarzenia do kursora w czystym modelu (liczby, c/u/d, status × przychód) w jednym snapshocie | integracyjny | `test_simulator.py::test_database_state_equals_the_pure_fold_of_events_up_to_the_cursor`, `::test_sim_clock_is_a_naive_timestamp_in_the_window` | ✅ |
+| 01 §5, §8 | `kill` + restart symulatora: wznowienie od `sim_state`, bez ponownej inicjalizacji, bez duplikatów, liczby jak bez przerwy | integracyjny, `slow` | `test_simulator.py::test_kill_and_restart_resumes_from_sim_state_without_duplicates` | ✅ |
 | 03 §11, 04 §8 | zdarzenia `c/u/d/r`, klucze = PK, ewolucja schematu, heartbeat, tombstones | integracyjny | etap 2 | ⏳ |
 | 05, 06 §11 | bronze/silver/gold, time travel, CDF, OPTIMIZE/VACUUM | integracyjny | etapy 3–4 | ⏳ |
 | 02–06 (awarie) | `kill` `connect`/`kafka`/`minio`/`spark`/`simulator` → uzgadnianie Postgres ↔ silver zgodne | e2e | etap 6 (skill `fault-injection`) | ⏳ |
@@ -259,8 +289,10 @@ Stan na 2026-10-20 (decyzja użytkownika z etapu 0, szczegóły w [06-minio-delt
 
 ## 14. Do weryfikacji w kolejnych etapach
 
-- **Snapshot przed startem konektora** (01 §4, 03 §2): `simulator` jest w profilu `pipeline`, więc dziś `connect-init` nie czeka na preload. Etap 2 decyduje: `connect-init` czeka na marker preloadu w `sim.sim_state`, albo symulator wychodzi z profilu i `connect-init` dostaje `depends_on: simulator` z warunkiem.
-- **Widoki `sim.v_truth_*`** (02 §8) nie mogą powstać w initdb przed tabelami symulatora: etap 1 tworzy je `CREATE OR REPLACE` z symulatora albo z event triggera (`containers/postgres/README.md`).
+- **Snapshot przed startem konektora** (01 §4, 03 §2): **po stronie symulatora rozstrzygnięte (etap 1)**: `simulator` startuje domyślnie (bez profilu), a jego healthcheck przechodzi dopiero po preloadzie (faza `replay`/`done` w pliku heartbeat; `sim.sim_state.phase` i `preload_finished_at` są widoczne dla `reader`). Etap 2: dodać `connect-init` zależność `depends_on: simulator: condition: service_healthy` (preload pełnej historii mieści się w `start_period` 120 s) i sprawdzić testem, że wiersze sprzed `SIM_START` przychodzą jako `op=r`, a od pierwszego zdarzenia replay jako `c/u/d` bez dziury i duplikatu.
+- **Rozstrzygnięte (etap 1): widoki `sim.v_truth_*`** leżą w `containers/postgres/sql/truth-views.sql` (zamontowany do kontenera symulatora jako `/app/sql/truth-views.sql`) i są wykonywane przez symulator jako `shop_app` w transakcji inicjalizacji; indeksy FK według 02 §7 zakłada symulator. Oba wcześniej pomijane testy przechodzą.
+- **`make up` zależy od `make data`** (symulator bez CSV nie staje się zdrowy); job CI `integration` pobiera dane przed startem stosu (`make data` z Kaggle bez logowania: do potwierdzenia na runnerze GitHub).
+- **Zdarzenia syntetyczne symulatora** (01 §7: `ALTER TABLE orders ADD COLUMN delivery_channel`, korekty cen) nie są zaimplementowane; potrzebne do testu ewolucji schematu (03 §5) w etapie 2–3.
 - **`pg_hba.conf`** domyślne z obrazu (`host all all all scram-sha-256`) obejmuje replikację; test `test_debezium_cannot_write` tworzy tymczasowy slot, pełne połączenie `pgoutput` sprawdzi etap 2.
 - **Heartbeat i tabela sygnałowa Debezium** (03 §7): jeśli mają leżeć w `sim`, rola `debezium` potrzebuje tam `INSERT/UPDATE`; dziś ma tylko `SELECT` na `shop`.
 - **RAM pełnego stosu** ≈ 9.5 GB przy 9.7 GB dostępnych: po etapie 3 zmierzyć i przyciąć limity Sparka i Connecta.

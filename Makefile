@@ -32,7 +32,7 @@ env: .env
 	cp .env.example .env
 	@echo "created .env from .env.example (edit it to change secrets)"
 
-up: .env
+up: .env data
 	$(COMPOSE) up -d --build
 	$(WAIT_HEALTHY) 300
 

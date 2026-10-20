@@ -16,7 +16,7 @@ argument-hint: "[up|down|reset|logs <service>|wait]"
 | `minio` | `minio` | 9000 (API), 9001 (console) | 127.0.0.1:9000 / 127.0.0.1:9091 (console) | `curl -f :9000/minio/health/live` |
 | `spark` | `spark` | 4040 (UI) | 127.0.0.1:4040 | driver log / metrics table |
 | `dashboard` | `dashboard` | 8501 | 127.0.0.1:8501 | `curl -f :8501/_stcore/health` |
-| `simulator` | `simulator` | - | - | `sim.sim_state` advancing |
+| `simulator` | `simulator` | - | - | `python /app/healthcheck.py`: heartbeat file fresh and phase `replay`/`done` (healthy = preload finished); runs by default, needs `data/olist` |
 | init (one-shot) | `kafka-init`, `connect-init`, `minio-init` | - | - | exit code 0 |
 
 Every host port is published on `127.0.0.1` only (single-machine lab; the Connect REST

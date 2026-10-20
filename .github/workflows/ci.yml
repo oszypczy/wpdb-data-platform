@@ -46,6 +46,8 @@ jobs:
         run: |
           cp .env.example .env
           docker compose build minio connect
+      - name: Olist data set (the simulator needs it to become healthy)
+        run: make data
       - name: start the stack
         run: |
           docker compose up -d

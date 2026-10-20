@@ -16,8 +16,8 @@ Numeracja odpowiada kolejności w przepływie danych.
 |---|---|---|
 | [00-overview.md](design/00-overview.md) | Całość: decyzje, przepływ, plan prac | ✅ |
 | [architecture.drawio](design/architecture.drawio) / [.png](design/architecture.png) | Diagram C4 (poziom kontenerów): wszystkie kontenery, protokoły i kierunki przepływu | ✅ |
-| [01-business-system.md](design/01-business-system.md) | Symulator sklepu (Python), zweryfikowany na danych Olist | ✅ |
-| [02-postgresql.md](design/02-postgresql.md) | PostgreSQL | ✅ |
+| [01-business-system.md](design/01-business-system.md) | Symulator sklepu (Python), zweryfikowany na danych Olist | ✅ (zaimplementowany, etap 1: `containers/simulator/`) |
+| [02-postgresql.md](design/02-postgresql.md) | PostgreSQL | ✅ (zaimplementowany, etap 1: `containers/postgres/`: event trigger `REPLICA IDENTITY FULL`, widoki prawdy `sim.v_truth_*`, polityka indeksów FK; heartbeat w etapie 2) |
 | [03-debezium.md](design/03-debezium.md) | Debezium (Kafka Connect) | ✅ |
 | [04-kafka.md](design/04-kafka.md) | Kafka + Schema Registry | ✅ |
 | [05-spark.md](design/05-spark.md) | Spark Structured Streaming | ✅ |

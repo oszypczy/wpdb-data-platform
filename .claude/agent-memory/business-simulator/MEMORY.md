@@ -1,0 +1,4 @@
+- [docker kill vs unless-stopped](project-docker-kill-no-autorestart.md) — SIGKILL does not auto-restart; tests must `compose up -d` again
+- [Olist data quirks](project-olist-data-quirks.md) — empty Jan 1-4 2017, midnight review bursts, date-vs-timestamp anomaly counts, 808k rows
+- [Test artifacts must not commit](feedback-test-artifacts-must-not-commit.md) — child-process transactions must abort on every exit path
+- [Writer kill test technique](project-writer-kill-test-technique.md) — row lock on sim.sim_state freezes the real writer on its last statement

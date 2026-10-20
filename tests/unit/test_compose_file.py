@@ -84,7 +84,7 @@ def test_every_long_running_service_has_healthcheck_and_restart_policy():
     init containers declare restart: "no" and depend on a healthy parent."""
     doc = yaml.safe_load(COMPOSE.read_text())
     init = {"kafka-init", "connect-init", "minio-init"}
-    placeholders = {"simulator", "spark", "dashboard"}  # healthchecks arrive with their stages
+    placeholders = {"spark", "dashboard"}  # healthchecks arrive with their stages
     for name, svc in doc["services"].items():
         if name in init:
             assert str(svc.get("restart")) == "no", f"{name}: init containers must not restart"
@@ -111,7 +111,11 @@ def test_no_latest_tags():
 
 
 CONTAINERS = ROOT / "containers"
-DOCKERFILES = [CONTAINERS / "connect" / "Dockerfile", CONTAINERS / "minio" / "Dockerfile"]
+DOCKERFILES = [
+    CONTAINERS / "connect" / "Dockerfile",
+    CONTAINERS / "minio" / "Dockerfile",
+    CONTAINERS / "simulator" / "Dockerfile",
+]
 
 
 def test_dockerfiles_pin_base_images():

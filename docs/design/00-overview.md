@@ -58,7 +58,7 @@ Po każdym etapie system działa i jest zweryfikowany.
 | Etap | Zakres | Projekt | Implementacja |
 |---|---|---|---|
 | 0 | Szkielet platformy: `docker-compose.yml` z infrastrukturą (Postgres, Kafka KRaft, Schema Registry, Connect z konwerterem AVRO, MinIO), healthchecki, kontenery startowe, `.env.example`, harness `pytest`, `Makefile`, CI, macierz wersji ([08](08-operations.md)) | ✅ | ✅ |
-| 1 | Dane + Business System + PostgreSQL | ✅ | ⏳ |
+| 1 | Dane + Business System + PostgreSQL | ✅ | ✅ (2026-10-20; zweryfikowane przez `qa-engineer`: 40 testów jednostkowych, 49 integracyjnych) |
 | 2 | Debezium + Kafka + Schema Registry (+ consumer) | ✅ | ⏳ |
 | 3 | Spark: bronze → silver | ✅ | ⏳ |
 | 4 | MinIO/Delta + gold | ✅ | ⏳ |
@@ -69,4 +69,4 @@ Po każdym etapie system działa i jest zweryfikowany.
 
 - Dashboard to dodatkowy kontener poza diagramem z `requirements/`. Trzeba potwierdzić z prowadzącym, że nie liczy się jako „nowy komponent”.
 - Plik geolocation (58 MB) jest poza repozytorium (`.gitignore`), bo mapa w dashboardzie korzysta z GeoJSON stanów. Wraca tylko, jeśli okaże się potrzebny.
-- Domyślne `SIM_SPEED` i `MAX_EVENTS_PER_SEC` dobrać pod prezentację.
+- **Rozstrzygnięte (etap 1):** domyślne `SIM_SPEED=1440`, `MAX_EVENTS_PER_SEC=20`, okno 2017-01-05 → 2017-03-31; zestaw na prezentację (Black Friday) w [01-business-system.md](01-business-system.md) §4 i `.env.example`.

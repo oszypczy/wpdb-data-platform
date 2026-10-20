@@ -23,6 +23,7 @@ DEFAULT_SERVICES = {
     "connect-init",
     "minio",
     "minio-init",
+    "simulator",  # stage 1: runs by default, healthy once its preload is done
 }
 INIT_SERVICES = ("kafka-init", "minio-init", "connect-init")
 HEALTHY_BUDGET_S = 180
