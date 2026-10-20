@@ -33,8 +33,8 @@
         "--init-sql", "${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/duckdb-init.sql"
       ],
       "env": {
-        "AWS_ACCESS_KEY_ID": "${MINIO_SPARK_ACCESS_KEY:-spark}",
-        "AWS_SECRET_ACCESS_KEY": "${MINIO_SPARK_SECRET_KEY:-spark-secret-dev}",
+        "AWS_ACCESS_KEY_ID": "${MINIO_AGENT_ACCESS_KEY:-agent}",
+        "AWS_SECRET_ACCESS_KEY": "${MINIO_AGENT_SECRET_KEY:-agent-secret-dev}",
         "AWS_REGION": "us-east-1"
       }
     },

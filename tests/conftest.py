@@ -93,12 +93,13 @@ def connect(stack) -> clients.Http:
 # --- MinIO ----------------------------------------------------------------------
 @pytest.fixture
 def minio(stack, settings):
-    """Factory: minio("spark") / minio("dashboard") / minio("root") -> boto3 S3 client."""
+    """Factory: minio("spark"|"dashboard"|"agent"|"root") -> boto3 S3 client."""
 
     def factory(account: str):
         keys = {
             "spark": ("MINIO_SPARK_ACCESS_KEY", "MINIO_SPARK_SECRET_KEY"),
             "dashboard": ("MINIO_DASHBOARD_ACCESS_KEY", "MINIO_DASHBOARD_SECRET_KEY"),
+            "agent": ("MINIO_AGENT_ACCESS_KEY", "MINIO_AGENT_SECRET_KEY"),
             "root": ("MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"),
         }[account]
         return clients.minio_client(settings[keys[0]], settings[keys[1]])

@@ -258,6 +258,8 @@ services:
       MINIO_SPARK_SECRET_KEY: ${MINIO_SPARK_SECRET_KEY:?set it in .env}
       MINIO_DASHBOARD_ACCESS_KEY: ${MINIO_DASHBOARD_ACCESS_KEY:?set it in .env}
       MINIO_DASHBOARD_SECRET_KEY: ${MINIO_DASHBOARD_SECRET_KEY:?set it in .env}
+      MINIO_AGENT_ACCESS_KEY: ${MINIO_AGENT_ACCESS_KEY:?set it in .env}
+      MINIO_AGENT_SECRET_KEY: ${MINIO_AGENT_SECRET_KEY:?set it in .env}
     volumes:
       - ./minio/init.sh:/minio/init.sh:ro
       - ./minio/policies:/minio/policies:ro

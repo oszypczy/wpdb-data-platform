@@ -27,6 +27,7 @@ Osobne kubełki zamiast prefiksów w jednym pozwalają na **uprawnienia per wars
 |---|---|
 | `spark` | odczyt i zapis we wszystkich kubełkach |
 | `dashboard` | tylko odczyt `gold` i `ops` |
+| `agent` | tylko odczyt wszystkich kubełków: serwer MCP `duckdb` dla agentów i odczyty w testach (DuckDB przez `httpfs` potrafi zapisywać do S3, więc nie dostaje kluczy `spark`) |
 | `root` | tylko kontener startowy |
 
 **Kontener startowy `minio-init`** (`mc`) tworzy kubełki, polityki i konta. Jest idempotentny (`mc mb --ignore-existing`).
@@ -114,6 +115,7 @@ Dashboard również czyta przez delta-rs lub DuckDB, bez Sparka.
 |---|---|---|
 | integracyjny | `minio-init` uruchomiony dwa razy | kubełki, polityki i konta istnieją; brak błędów |
 | integracyjny | uprawnienia konta `dashboard` | odczyt `gold` działa; zapis do `gold` i odczyt `bronze` odrzucone |
+| integracyjny | uprawnienia konta `agent` | odczyt każdego kubełka działa; zapis i usuwanie odrzucone |
 | integracyjny | zapis przez Sparka, odczyt przez delta-rs i DuckDB | identyczne wyniki |
 | integracyjny | time travel | `VERSION AS OF n` zwraca stan sprzed późniejszego MERGE |
 | integracyjny | `RESTORE` | tabela wraca do wskazanej wersji |

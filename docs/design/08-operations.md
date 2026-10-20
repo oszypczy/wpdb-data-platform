@@ -148,7 +148,7 @@ Wszystkie zmienne są w `.env.example` z komentarzem; `make up` kopiuje go do `.
 | Grupa | Zmienne | Kto używa |
 |---|---|---|
 | Postgres | `POSTGRES_PASSWORD`, `SHOP_APP_PASSWORD`, `DEBEZIUM_DB_PASSWORD`, `READER_PASSWORD` | initdb (role), symulator, Connect (`${env:DEBEZIUM_DB_PASSWORD}`), testy i MCP (`reader`) |
-| MinIO | `MINIO_ROOT_USER/PASSWORD`, `MINIO_SPARK_ACCESS_KEY/SECRET_KEY`, `MINIO_DASHBOARD_ACCESS_KEY/SECRET_KEY` | `minio`, `minio-init`, Spark, dashboard, testy, MCP `duckdb` |
+| MinIO | `MINIO_ROOT_USER/PASSWORD`, `MINIO_SPARK_ACCESS_KEY/SECRET_KEY`, `MINIO_DASHBOARD_ACCESS_KEY/SECRET_KEY`, `MINIO_AGENT_ACCESS_KEY/SECRET_KEY` (tylko odczyt, MCP `duckdb` i testy) | `minio`, `minio-init`, Spark, dashboard, testy, MCP `duckdb` |
 | Kafka | `KAFKA_CLUSTER_ID` | formatowanie wolumenu KRaft (stałe ID = broker wstaje na istniejących danych) |
 | Symulator | `SIM_SPEED`, `MAX_EVENTS_PER_SEC`, `SIM_START`, `SIM_END` | etap 1 |
 
@@ -206,6 +206,7 @@ Status: ✅ przechodzi, ⏳ zaplanowany (etap). Wiersze etapu 0 z planu `qa-engi
 | 06 §2 | kubełki `bronze silver gold ops checkpoints` istnieją (i żadne inne) | integracyjny | `tests/integration/test_minio.py::test_buckets_exist` | ✅ |
 | 06 §2 | konto `spark` RW we wszystkich kubełkach | integracyjny | `test_minio.py::test_spark_account_rw_all_buckets` | ✅ |
 | 06 §11 | konto `dashboard` czyta `gold`/`ops`; zapis do `gold` i odczyt `bronze`/`silver` odrzucone | integracyjny | `test_minio.py::test_dashboard_account_restricted` | ✅ |
+| 06 §2 / 09 §3 | konto `agent` (MCP `duckdb`, testy) czyta każdy kubełek, nie zapisuje ani nie usuwa | integracyjny | `test_minio.py::test_agent_account_read_only_everywhere` | ✅ |
 | 06 §12, 08 §13 | MinIO i mc zbudowane z przypiętych tagów (`--version`) | integracyjny | `test_minio.py::test_server_version_matches_pinned_tag` | ✅ |
 | 08 §13 | porty MinIO tylko na `127.0.0.1` | integracyjny | `test_minio.py::test_api_bound_to_localhost_only` | ✅ |
 | 02 §2, §10 | nowa tabela w `shop` → `REPLICA IDENTITY FULL` (event trigger) | integracyjny | etap 1 (`database-cdc`) | ⏳ |

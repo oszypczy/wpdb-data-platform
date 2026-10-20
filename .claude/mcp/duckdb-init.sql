@@ -1,7 +1,8 @@
 -- Startup SQL for the "duckdb" MCP server (mcp-server-motherduck --init-sql).
 -- Loads the Delta and S3 readers and creates one S3 secret pointing at the
 -- local MinIO. Credentials come from the environment set in .mcp.json
--- (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY = the MinIO `spark` account,
+-- (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY = the MinIO `agent` account, read-only
+-- on every bucket: DuckDB could otherwise COPY TO s3:// with a writer account;
 -- defaults from .env.example), read through the `aws` credential chain.
 INSTALL delta;
 LOAD delta;

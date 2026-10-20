@@ -9,6 +9,7 @@ BUCKETS="bronze silver gold ops checkpoints"
 : "${MINIO_ROOT_USER:?}" "${MINIO_ROOT_PASSWORD:?}"
 : "${MINIO_SPARK_ACCESS_KEY:?}" "${MINIO_SPARK_SECRET_KEY:?}"
 : "${MINIO_DASHBOARD_ACCESS_KEY:?}" "${MINIO_DASHBOARD_SECRET_KEY:?}"
+: "${MINIO_AGENT_ACCESS_KEY:?}" "${MINIO_AGENT_SECRET_KEY:?}"
 
 # depends_on: service_healthy already waited for MinIO; this retry only covers
 # the window between the health probe and the API accepting authenticated calls.
@@ -26,10 +27,12 @@ done
 # `mc admin policy create` replaces an existing policy of the same name (upsert).
 mc admin policy create local spark /minio/policies/spark.json
 mc admin policy create local dashboard /minio/policies/dashboard.json
+mc admin policy create local agent-ro /minio/policies/agent-ro.json
 
 # `mc admin user add` creates the user or resets its secret key (upsert).
 mc admin user add local "$MINIO_SPARK_ACCESS_KEY" "$MINIO_SPARK_SECRET_KEY"
 mc admin user add local "$MINIO_DASHBOARD_ACCESS_KEY" "$MINIO_DASHBOARD_SECRET_KEY"
+mc admin user add local "$MINIO_AGENT_ACCESS_KEY" "$MINIO_AGENT_SECRET_KEY"
 
 # `mc admin policy attach` fails when the policy is already attached, so guard it
 # with the user's current policy list.
@@ -43,6 +46,7 @@ attach_once() {
 }
 attach_once spark "$MINIO_SPARK_ACCESS_KEY"
 attach_once dashboard "$MINIO_DASHBOARD_ACCESS_KEY"
+attach_once agent-ro "$MINIO_AGENT_ACCESS_KEY"
 
 echo "minio-init: done"
 mc ls local

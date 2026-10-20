@@ -81,6 +81,30 @@ def test_dashboard_account_restricted(minio):
         spark.delete_object(Bucket="bronze", Key=key)
 
 
+def test_agent_account_read_only_everywhere(minio):
+    """06 §2 / 09 §3: account agent (MCP duckdb, tests) reads every bucket, never writes."""
+    spark, agent = minio("spark"), minio("agent")
+    key = f"_stage0_probe/{uuid.uuid4()}.txt"
+    for bucket in BUCKETS:
+        spark.put_object(Bucket=bucket, Key=key, Body=bucket.encode())
+    try:
+        for bucket in BUCKETS:
+            assert agent.get_object(Bucket=bucket, Key=key)["Body"].read() == bucket.encode()
+            assert key in [
+                o["Key"]
+                for o in agent.list_objects_v2(Bucket=bucket, Prefix="_stage0_probe/")["Contents"]
+            ]
+            with pytest.raises(ClientError) as e:
+                agent.put_object(Bucket=bucket, Key=key + ".w", Body=b"x")
+            assert error_code(e.value) == "AccessDenied", bucket
+            with pytest.raises(ClientError) as e:
+                agent.delete_object(Bucket=bucket, Key=key)
+            assert error_code(e.value) == "AccessDenied", bucket
+    finally:
+        for bucket in BUCKETS:
+            spark.delete_object(Bucket=bucket, Key=key)
+
+
 def test_server_version_matches_pinned_tag(stack: ComposeStack):
     """08 §13: the image was built from the pinned source tags (minio --version / mc --version)."""
     minio_tag, mc_tag = pinned("MINIO_TAG"), pinned("MC_TAG")

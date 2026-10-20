@@ -69,7 +69,7 @@ def _snapshot(stack: ComposeStack, service: str) -> object:
         users = stack.exec("minio", "mc", "admin", "user", "list", "local").stdout
         policies = stack.exec("minio", "mc", "admin", "policy", "ls", "local").stdout
         attachments = {}
-        for user in ("spark", "dashboard"):
+        for user in ("spark", "dashboard", "agent"):
             info = json.loads(
                 stack.exec("minio", "mc", "admin", "user", "info", "--json", "local", user).stdout
             )
@@ -111,5 +111,6 @@ def test_init_container_idempotent(stack: ComposeStack, service: str):
         assert before["attachments"] == {
             "spark": ("enabled", ["spark"]),
             "dashboard": ("enabled", ["dashboard"]),
+            "agent": ("enabled", ["agent-ro"]),
         }, before["attachments"]
-        assert {"spark", "dashboard"} <= set(before["policies"]), before["policies"]
+        assert {"spark", "dashboard", "agent-ro"} <= set(before["policies"]), before["policies"]
