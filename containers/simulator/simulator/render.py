@@ -34,6 +34,13 @@ class Renderer:
         self._update_final = f"UPDATE {orders} SET {status} = %s WHERE {oid} = %s"
         self._delete_items = f"DELETE FROM {qualified(pg_schema, 'order_items')} WHERE {oid} = %s"
         self._future = [ds.o_lifecycle[c] for c in ev.FUTURE_COLUMNS]
+        channel = quote_ident(ev.DELIVERY_CHANNEL_COLUMN)
+        # nullable on purpose: BACKWARD-compatible AVRO schema (03 §5); IF NOT EXISTS keeps a
+        # replay of the event harmless (the cursor already makes it run exactly once)
+        self._add_channel = f"ALTER TABLE {orders} ADD COLUMN IF NOT EXISTS {channel} TEXT NULL"
+        cols = ", ".join(quote_ident(c) for c in schemas["orders"].column_names)
+        marks = ", ".join(["%s"] * (len(schemas["orders"].columns) + 1))
+        self._insert_order_channel = f"INSERT INTO {orders} ({cols}, {channel}) VALUES ({marks})"
 
     @staticmethod
     def _insert_sql(pg_schema: str, schema: TableSchema) -> str:
@@ -55,7 +62,10 @@ class Renderer:
             order[self.ds.o_status] = ev.INITIAL_STATUS
             for i in self._future:
                 order[i] = ""  # not known yet: filled by the later UPDATEs
-            out.append(self.insert("orders", order))
+            if e.channel is None:
+                out.append(self.insert("orders", order))
+            else:
+                out.append((self._insert_order_channel, (*sql_row(order), e.channel)))
             out += [self.insert("order_items", r) for r in od.items]
             out += [self.insert("order_payments", r) for r in od.payments]
             return out
@@ -70,4 +80,6 @@ class Renderer:
         if e.kind == "review":
             assert e.row is not None
             return [self.insert("order_reviews", e.row)]
+        if e.kind == "schema":
+            return [(self._add_channel, ())]
         raise ValueError(f"unknown event kind {e.kind!r}")

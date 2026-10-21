@@ -213,7 +213,7 @@ FROM pg_database WHERE datname = current_database()
 UNION ALL
 SELECT 'schema ' || nspname || ' owner=' || pg_get_userbyid(nspowner)
        || ' acl=' || coalesce(nspacl::text, '-')
-FROM pg_namespace WHERE nspname IN ('shop', 'sim', 'public')
+FROM pg_namespace WHERE nspname IN ('shop', 'sim', 'dbz', 'public')
 UNION ALL
 SELECT 'defacl role=' || pg_get_userbyid(d.defaclrole) || ' schema=' || coalesce(n.nspname, '-')
        || ' type=' || d.defaclobjtype::text || ' acl=' || d.defaclacl::text
@@ -233,10 +233,10 @@ FROM pg_publication_rel pr
 JOIN pg_publication p ON p.oid = pr.prpubid
 JOIN pg_class c ON c.oid = pr.prrelid
 UNION ALL
-SELECT 'acl sim.' || c.relname || ' owner=' || pg_get_userbyid(c.relowner)
+SELECT 'acl dbz.' || c.relname || ' owner=' || pg_get_userbyid(c.relowner)
        || ' acl=' || coalesce(c.relacl::text, '-')
 FROM pg_class c
-WHERE c.relnamespace = 'sim'::regnamespace AND c.relname = 'heartbeat'
+WHERE c.relnamespace = 'dbz'::regnamespace AND c.relname = 'heartbeat'
 UNION ALL
 SELECT 'eventtrigger ' || e.evtname || ' event=' || e.evtevent || ' enabled=' || e.evtenabled::text
        || ' tags=' || coalesce(array_to_string(e.evttags, ','), '-')

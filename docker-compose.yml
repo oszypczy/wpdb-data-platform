@@ -164,6 +164,9 @@ services:
       CONFIG_STORAGE_REPLICATION_FACTOR: 1
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
+      # offsets (and the slot's confirmed_flush_lsn) committed every 5 s instead of the
+      # image default 60 s: a task restart re-delivers at most ~5 s of events (03 §9)
+      OFFSET_FLUSH_INTERVAL_MS: 5000
       KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
       VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
       CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
@@ -322,6 +325,8 @@ services:
       MAX_EVENTS_PER_SEC: ${MAX_EVENTS_PER_SEC:-20}
       SIM_START: ${SIM_START:-2017-01-05}
       SIM_END: ${SIM_END:-2017-03-31}
+      # synthetic schema evolution (01 §7); empty = off (default, deterministic runs)
+      SIM_SCHEMA_EVOLUTION_AT: ${SIM_SCHEMA_EVOLUTION_AT:-}
       SIM_DATA_DIR: /data/olist
       SIM_TRUTH_VIEWS: /app/sql/truth-views.sql
     volumes:

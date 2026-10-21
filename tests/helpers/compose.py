@@ -143,7 +143,7 @@ class ComposeStack:
     def exec(self, service: str, *cmd: str, check: bool = True) -> subprocess.CompletedProcess:
         return self.run("exec", "-T", service, *cmd, check=check)
 
-    def logs(self, service: str, tail: int = 200) -> str:
+    def logs(self, service: str, tail: int | str = 200) -> str:  # tail="all" for everything
         return self.run("logs", "--no-color", "--tail", str(tail), service).stdout
 
     def kill(self, service: str) -> None:

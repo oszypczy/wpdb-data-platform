@@ -27,11 +27,11 @@ docker compose up -d --force-recreate --no-deps connect-init   # re-register aft
 Config facts (containers/connect/README.md has the full table): `snapshot.mode=initial`,
 `schema.include.list=shop` + `table.exclude.list=shop\._.*` (tables named `_…` are test
 probes, never captured), `decimal.handling.mode=precise`, `time.precision.mode=connect`,
-heartbeat every 10 s into `sim.heartbeat` (the table is in the publication on purpose),
+heartbeat every 10 s into `dbz.heartbeat` (the table is in the publication on purpose),
 `provide.transaction.metadata=true` (`olist.transaction`; ids are `txId:lsn` per record,
 group by the `txId` prefix), `topic.creation.*` groups `large/transaction/heartbeat/default`.
-Offsets are flushed every 60 s: a task restart re-delivers up to 60 s of events
-(at-least-once).
+Offsets are flushed every 5 s (`OFFSET_FLUSH_INTERVAL_MS=5000` on the worker): a task
+restart re-delivers up to ~5 s of events (at-least-once).
 
 Postgres side (read-only; use the `postgres` MCP or `psql` as `reader`):
 

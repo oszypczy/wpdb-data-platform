@@ -52,9 +52,7 @@ jobs:
         run: |
           docker compose up -d
           .claude/skills/stack-ops/scripts/wait-healthy.sh 300
-      - name: integration suite on the running stack
-        run: uv run pytest -m integration
-      - name: integration suite from wiped volumes (180 s startup budget test)
+      - name: full integration suite from wiped volumes (incl. slow and the 180 s startup budget test)
         run: make test-integration-fresh
       - name: logs on failure
         if: failure()

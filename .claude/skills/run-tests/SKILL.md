@@ -10,12 +10,16 @@ Three levels, selected by pytest markers (defined in the root `pyproject.toml`):
 | Level | Marker | Needs | Target |
 |---|---|---|---|
 | unit | `unit` | nothing (local Spark + Delta on filesystem is allowed) | `make test-unit` |
-| integration | `integration` | the containers the test declares (compose profile or testcontainers), started by the fixture | `make test-integration` |
+| integration (fast) | `integration and not slow` | the running stack (the `stack` fixture starts it if it is down) | `make test-integration` |
+| integration (full) | `integration` (incl. `slow`) | the running stack | `make test-integration-full` |
+| integration (fresh) | `integration` (incl. `slow`) | wiped volumes first (`WPDB_FRESH=1`, adds the 180 s startup budget test); what CI runs | `make test-integration-fresh` |
 | e2e | `e2e` | the full stack, healthy, fresh (`make reset` first) | `make test-e2e` |
 
 ```bash
 make test-unit                                   # fast, run on every change
-make test-integration                            # starts what it needs
+make test-integration                            # fast set (not slow), on every change
+make test-integration-full                       # all integration tests incl. slow, running stack
+make test-integration-fresh                      # all integration tests from wiped volumes (CI)
 make test-e2e                                    # full stack, minutes; includes fault injection
 pytest tests/integration/test_debezium.py -k add_column -x -ra   # one test, stop on first failure
 pytest -m "unit and not slow" -q

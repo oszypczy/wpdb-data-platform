@@ -171,6 +171,14 @@ def test_connect_init_waits_for_the_simulator_preload():
     assert deps["connect"] == {"condition": "service_healthy"}
 
 
+def test_connect_worker_flushes_offsets_every_5_s():
+    """03 §9 / 08 §5: the worker commits source offsets every 5 s (Debezium image env
+    OFFSET_FLUSH_INTERVAL_MS → offset.flush.interval.ms), so a task restart re-delivers at
+    most ~5 s of events instead of the image default 60 s."""
+    env = yaml.safe_load(COMPOSE.read_text())["services"]["connect"]["environment"]
+    assert int(env["OFFSET_FLUSH_INTERVAL_MS"]) == 5000
+
+
 def test_connector_json_is_pure_json_with_env_secret_and_topic_groups():
     """03 §8, §10 / 04 §3, §7: the connector file parses as JSON (no // comments), the
     password is a ${env:…} placeholder, topics come from topic.creation groups and the
@@ -188,7 +196,7 @@ def test_connector_json_is_pure_json_with_env_secret_and_topic_groups():
     assert cfg["tombstones.on.delete"] == "true"
     assert cfg["provide.transaction.metadata"] == "true"
     assert (
-        cfg["heartbeat.interval.ms"] == "10000" and "sim.heartbeat" in cfg["heartbeat.action.query"]
+        cfg["heartbeat.interval.ms"] == "10000" and "dbz.heartbeat" in cfg["heartbeat.action.query"]
     )
     groups = cfg["topic.creation.groups"].split(",")
     assert groups == ["large", "transaction", "heartbeat"]

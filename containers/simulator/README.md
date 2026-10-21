@@ -57,6 +57,7 @@ are in `tests/integration/test_simulator.py`.
 | `SIM_TRUTH_VIEWS` | `/app/sql/truth-views.sql` | reconciliation views applied after the tables |
 | `SIM_HEARTBEAT_FILE` | `/tmp/simulator/heartbeat` | liveness file (`-` disables) |
 | `SIM_LOG_EVERY`, `SIM_PRELOAD_BATCH` | `10`, `1000` | progress log period (s), preload batch size |
+| `SIM_SCHEMA_EVOLUTION_AT` | empty (off) | simulated moment of the one-off `ALTER TABLE shop.orders ADD COLUMN delivery_channel TEXT NULL`; later purchases fill it (01 §7). Stored in `sim.sim_state.schema_evolution_at`; keep it off while `test_debezium.py` runs |
 
 Progress log, every `SIM_LOG_EVERY` seconds:
 `[sim 2017-01-11 14:03:12] phase=replay orders=412 rows=3105 (c=2011 u=1082 d=12) rate=6.8/s throttled`.

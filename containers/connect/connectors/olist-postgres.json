@@ -22,7 +22,7 @@
   "time.precision.mode": "connect",
 
   "heartbeat.interval.ms": "10000",
-  "heartbeat.action.query": "INSERT INTO sim.heartbeat (id, ts) VALUES (1, now()) ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts",
+  "heartbeat.action.query": "INSERT INTO dbz.heartbeat (id, ts) VALUES (1, now()) ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts",
   "provide.transaction.metadata": "true",
 
   "key.converter": "io.confluent.connect.avro.AvroConverter",

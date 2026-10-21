@@ -45,19 +45,20 @@ CREATE PUBLICATION dbz_publication FOR TABLES IN SCHEMA shop;   -- PostgreSQL 15
 
 Publikację tworzy skrypt startowy, a Debezium tylko z niej korzysta (`publication.autocreate.mode=disabled`). Każda nowa tabela w `shop` automatycznie trafia do CDC. Zgadza się to z dynamicznym tworzeniem tabel i z demo ewolucji schematu (`ALTER TABLE ADD COLUMN`).
 
-**Wyjątki (etap 2):** do publikacji należy dodatkowo pojedyncza tabela `sim.heartbeat` (§5; sam schemat `sim` nie), a tabele `shop._*` (sondy testowe tworzone i usuwane w milisekundach) są w publikacji, ale konektor ich nie przechwytuje (`table.exclude.list`, [03-debezium.md](03-debezium.md) §13: tabela usunięta przed zapisem offsetu konektora zostawia zdarzenia bez klucza, które kompaktowany temat odrzuca).
+**Wyjątki (etap 2):** do publikacji należy dodatkowo pojedyncza tabela `dbz.heartbeat` (§5; schematy `sim` i `dbz` jako całość nie), a tabele `shop._*` (sondy testowe tworzone i usuwane w milisekundach) są w publikacji, ale konektor ich nie przechwytuje (`table.exclude.list`, [03-debezium.md](03-debezium.md) §13: tabela usunięta przed zapisem offsetu konektora zostawia zdarzenia bez klucza, które kompaktowany temat odrzuca).
 
 ## 4. Rozszerzenie: schematy i role z minimalnymi uprawnieniami
 
 | Schemat | Zawartość | W CDC |
 |---|---|---|
 | `shop` | tabele biznesowe (customers, orders, order_items, …) | tak |
-| `sim` | `sim_state` (zegar symulacji), widoki uzgadniania, tabela heartbeat | nie; wyjątek: tabela `sim.heartbeat` jest w publikacji, ale konektor ją odfiltrowuje (§5) |
+| `sim` | `sim_state` (zegar symulacji), widoki uzgadniania | nie |
+| `dbz` | tylko `dbz.heartbeat`; właściciel `postgres`, `USAGE` dla `debezium` i `reader` | tak, sama tabela heartbeat; konektor ją odfiltrowuje (§5) |
 
 | Rola | Uprawnienia |
 |---|---|
 | `shop_app` (symulator) | DDL i DML w `shop`, zapis w `sim` |
-| `debezium` | `REPLICATION` + `SELECT` na `shop`; `USAGE` na `sim` i `SELECT, INSERT, UPDATE` tylko na `sim.heartbeat` (§5); `sim.sim_state` i widoki niewidoczne |
+| `debezium` | `REPLICATION` + `SELECT` na `shop`; `USAGE` na `dbz` i `SELECT, INSERT, UPDATE` tylko na `dbz.heartbeat` (§5); brak `USAGE` na `sim`, więc `sim.sim_state` i widoki są niewidoczne |
 | `reader` | tylko `SELECT` na `shop` i `sim`: odczyt uzgadniający w testach i podgląd dla agentów (MCP `postgres`, [09-agents.md](09-agents.md) §3) |
 | `postgres` | tylko skrypty startowe |
 
@@ -66,7 +67,7 @@ Publikację tworzy skrypt startowy, a Debezium tylko z niej korzysta (`publicati
 Slot zatrzymuje WAL, dopóki Debezium go nie odczyta. Jeśli Connect leży, a symulator pisze, WAL rośnie bez ograniczeń i może zapchać dysk Dockera.
 
 - **`max_slot_wal_keep_size=2GB`:** po przekroczeniu limitu slot zostaje unieważniony zamiast zapychać dysk. Debezium musi wtedy wykonać ponowny snapshot, co trzeba uwzględnić w konfiguracji `snapshot.mode`.
-- **Heartbeat (rozstrzygnięte, etap 2):** Debezium co 10 s wykonuje upsert jednego wiersza `sim.heartbeat (id = 1, ts)` (`heartbeat.action.query`), żeby slot przesuwał się także w okresach ciszy. **Tabela musi być w publikacji** (dokumentacja Debezium 3.6, „WAL disk space consumption”): konektor dostaje zmianę, odfiltrowuje ją (`schema.include.list=shop`), a odfiltrowane zdarzenie wymusza zapis offsetu, co przesuwa `confirmed_flush_lsn`. Realizacja w `containers/postgres/initdb/20-heartbeat.sql`: tabela (właściciel `postgres`, nie `shop_app`: właściciel tabeli może dodać trigger, a trigger odpalony przez upsert konektora wykonałby się z uprawnieniami roli `debezium` z `REPLICATION`; nikt poza `postgres` nie ma `TRIGGER`; `CHECK (id = 1)`), `ALTER PUBLICATION dbz_publication ADD TABLE sim.heartbeat`, `GRANT USAGE ON SCHEMA sim TO debezium`, `GRANT SELECT, INSERT, UPDATE ON sim.heartbeat TO debezium`, `GRANT SELECT … TO reader` (tabelę tworzy `postgres`, więc domyślne uprawnienia `shop_app` jej nie obejmują). Testy: `test_postgres.py::test_heartbeat_table_grants_and_publication`, `test_debezium.py::test_heartbeat_advances_the_slot_while_shop_is_idle`.
+- **Heartbeat (rozstrzygnięte, etap 2):** Debezium co 10 s wykonuje upsert jednego wiersza `dbz.heartbeat (id = 1, ts)` (`heartbeat.action.query`), żeby slot przesuwał się także w okresach ciszy. **Tabela musi być w publikacji** (dokumentacja Debezium 3.6, „WAL disk space consumption”): konektor dostaje zmianę, odfiltrowuje ją (`schema.include.list=shop`), a odfiltrowane zdarzenie wymusza zapis offsetu, co przesuwa `confirmed_flush_lsn`. Realizacja w `containers/postgres/initdb/20-heartbeat.sql`: osobny schemat `dbz` i tabela, oba z właścicielem `postgres` (właściciel tabeli albo jej schematu może dodać trigger lub usunąć tabelę i założyć ją od nowa z triggerem, a trigger odpalony przez upsert konektora wykonałby się z uprawnieniami roli `debezium` z `REPLICATION`; schemat `sim` należy do `shop_app`, więc heartbeat nie może w nim leżeć), `CHECK (id = 1)`, `ALTER PUBLICATION dbz_publication ADD TABLE dbz.heartbeat`, `GRANT USAGE ON SCHEMA dbz TO debezium, reader`, `GRANT SELECT, INSERT, UPDATE ON dbz.heartbeat TO debezium`, `GRANT SELECT … TO reader` (tabelę tworzy `postgres`, więc domyślne uprawnienia `shop_app` jej nie obejmują). Testy: `test_postgres.py::test_heartbeat_table_grants_and_publication`, `test_debezium.py::test_heartbeat_advances_the_slot_while_shop_is_idle`.
 - **Unieważnienie slotu:** przy `snapshot.mode=initial` konektor nie robi sam ponownego snapshotu; procedura ręczna w [03-debezium.md](03-debezium.md) §13. Przy domyślnym oknie (≈ 40 MB WAL) limit 2 GB jest nieosiągalny.
 - **Monitoring opóźnienia** (kandydat na wskaźnik w dashboardzie):
   ```sql

@@ -48,6 +48,7 @@ STATE_COLUMNS = (
     "rows_inserted",
     "rows_updated",
     "rows_deleted",
+    "schema_evolution_at",
 )
 
 # 01 §3 on the real data: the public interface that Debezium captures
@@ -438,6 +439,7 @@ def _expected_after(cursor_state: dict) -> ev.Summary:
     tables = load_dir(DATA)
     ds = ev.Dataset(tables)
     events = ev.build_events(ds.build_orders(), ds, until=cursor_state["sim_end"])
+    events = ev.with_schema_evolution(events, cursor_state["schema_evolution_at"])
     preload, replay = ev.split_window(events, cursor_state["sim_start"], cursor_state["sim_end"])
     cursor = (
         cursor_state["sim_clock"],
@@ -485,6 +487,14 @@ def assert_matches_uninterrupted_run(pg_reader) -> dict:
         "order_reviews": expected.order_reviews,
     }
     assert {t: counts[t] for t in CATALOG_COUNTS} == CATALOG_COUNTS
+    if expected.schema_evolved:  # 01 §7: only when SIM_SCHEMA_EVOLUTION_AT is set and passed
+        channels = dict(
+            pg_reader.execute(
+                "SELECT delivery_channel, count(*) FROM shop.orders "
+                "WHERE delivery_channel IS NOT NULL GROUP BY 1"
+            ).fetchall()
+        )
+        assert channels == expected.delivery_channels
     assert by_status == {s: (t.orders, t.items, t.revenue) for s, t in expected.by_status.items()}
     return state
 
@@ -691,6 +701,7 @@ def _failing_streak(stack) -> int:
     return int(stack.docker("inspect", "-f", "{{.State.Health.FailingStreak}}", "simulator").stdout)
 
 
+@pytest.mark.slow  # slow: >= 30 s by design (staleness threshold + healthcheck interval)
 def test_stale_heartbeat_fails_the_healthcheck(simulator_running, stack):
     """01 §5: when the process stops beating (frozen with SIGSTOP), `healthcheck.py` fails once
     the heartbeat is older than 30 s and Docker records failing checks; after SIGCONT the
@@ -742,3 +753,54 @@ def test_changed_sim_start_on_restart_is_ignored_with_a_warning(
         logs = _start_and_wait_resumed(stack)  # back to the compose/.env environment
     assert "differs from the stored" not in logs, logs
     assert read_state(pg_reader)["sim_start"] == before["sim_start"]
+
+
+# --- 01 §7: synthetic schema evolution through the real writer, rolled back ------------------
+def test_schema_evolution_event_adds_a_nullable_column_and_fills_it_rolled_back(
+    simulator_running, pg_reader, pg_app, settings
+):
+    """01 §7 (integration): the writer applies the schema event and a later purchase in one
+    outer transaction that is rolled back at the end, so the shared stack (and Debezium,
+    which never sees rolled-back changes) is unaffected: `delivery_channel` is added as a
+    nullable TEXT column, keeps REPLICA IDENTITY FULL, the purchase fills it with the
+    deterministic channel, and the cursor moves with it; after the rollback nothing remains.
+    The live run keeps SIM_SCHEMA_EVOLUTION_AT off (default)."""
+    column_sql = (
+        "SELECT format_type(atttypid, atttypmod), attnotnull FROM pg_attribute "
+        "WHERE attrelid = 'shop.orders'::regclass AND attname = 'delivery_channel' "
+        "AND NOT attisdropped"
+    )
+    if pg_reader.execute(column_sql).fetchone() is not None:
+        pytest.skip("shop.orders.delivery_channel exists: the Debezium evolution test is running")
+    assert read_state(pg_reader)["schema_evolution_at"] is None  # default run: off
+    _remove_test_rows(pg_app)
+    purchase, renderer, oid, _cid = _synthetic_purchase(pg_reader, "evolution")
+    events = ev.with_schema_evolution([purchase], purchase.ts - timedelta(seconds=1))
+    assert [e.kind for e in events] == ["schema", "purchase"] and events[1].channel
+    db = Database(_shop_app_conninfo(settings, "test-half-evolution"))
+    db.connect()
+    try:
+        conn = db.conn
+        with conn.transaction(force_rollback=True):
+            # short lock waits: never hang the shared stack behind another session
+            conn.execute("SET LOCAL lock_timeout = '5s'")
+            db.apply(events, renderer)
+            assert conn.execute(column_sql).fetchone() == ("text", False)
+            assert conn.execute(
+                "SELECT relreplident FROM pg_class WHERE oid = 'shop.orders'::regclass"
+            ).fetchone() == ("f",)
+            row = conn.execute(
+                "SELECT order_status, delivery_channel FROM shop.orders WHERE order_id = %s",
+                (oid,),
+            ).fetchone()
+            assert row == ("created", ev.delivery_channel(oid))
+            cursor = conn.execute(
+                "SELECT sim_clock, cursor_order_id, cursor_step FROM sim.sim_state"
+            ).fetchone()
+            assert cursor == events[-1].key
+    finally:
+        db.close()
+        _remove_test_rows(pg_app)
+    assert pg_reader.execute(column_sql).fetchone() is None
+    assert _traces(pg_reader, oid, _cid)["orders"] == 0
+    assert read_state(pg_reader)["cursor_order_id"] != oid

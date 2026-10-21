@@ -142,8 +142,8 @@ SIM_PROBE = "sim._stage0_probe"
 
 
 def test_sim_schema_privileges(pg_reader, pg_debezium, pg_app):
-    """02 §4: reader may SELECT in sim (not write); debezium may enter sim only for the
-    heartbeat table (02 §5, stage 2) and cannot read or write anything else there."""
+    """02 §4: reader may SELECT in sim (not write); debezium has no access to sim at all
+    (its heartbeat table lives in schema dbz, 02 §5), so it cannot read or write there."""
     pg_app.execute(f"DROP TABLE IF EXISTS {SIM_PROBE}")
     pg_app.execute(f"CREATE TABLE {SIM_PROBE} (id int PRIMARY KEY, v text)")
     pg_app.execute(f"INSERT INTO {SIM_PROBE} VALUES (1, 'a')")
@@ -160,7 +160,7 @@ def test_sim_schema_privileges(pg_reader, pg_debezium, pg_app):
         assert pg_reader.execute(
             "SELECT has_schema_privilege('debezium', 'sim', 'USAGE'), "
             "has_schema_privilege('debezium', 'sim', 'CREATE')"
-        ).fetchone() == (True, False)
+        ).fetchone() == (False, False)
         assert pg_reader.execute(
             "SELECT has_table_privilege('debezium', 'sim.sim_state', 'SELECT')"
         ).fetchone() == (False,)
@@ -428,39 +428,56 @@ def test_delete_order_items_by_order_id_uses_index(pg_reader, pg_app):
 
 
 # --- stage 2 (02 §5): heartbeat table ---------------------------------------------------
-def test_heartbeat_table_grants_and_publication(pg_reader, pg_debezium):
-    """02 §5, 03 §7: sim.heartbeat (one row, id = 1) exists from initdb; debezium may
-    SELECT/INSERT/UPDATE exactly this table; it is the only sim table in dbz_publication
-    (the schema sim itself is not published); reader can read it."""
-    assert pg_reader.execute("SELECT id FROM sim.heartbeat").fetchall() == [(1,)]
+def test_heartbeat_table_grants_and_publication(pg_reader, pg_debezium, pg_app):
+    """02 §5, 03 §7: dbz.heartbeat (one row, id = 1) lives in schema dbz owned by postgres;
+    debezium may SELECT/INSERT/UPDATE exactly this table and has no USAGE on sim; it is the
+    only non-shop table in dbz_publication; reader can read it; shop_app can neither drop,
+    alter nor shadow it, so nobody but postgres can attach a trigger that would run as
+    debezium (REPLICATION) on the connector's upsert."""
+    assert pg_reader.execute("SELECT id FROM dbz.heartbeat").fetchall() == [(1,)]
     privs = pg_reader.execute(
-        "SELECT has_table_privilege('debezium', 'sim.heartbeat', 'SELECT'), "
-        "has_table_privilege('debezium', 'sim.heartbeat', 'INSERT'), "
-        "has_table_privilege('debezium', 'sim.heartbeat', 'UPDATE'), "
-        "has_table_privilege('debezium', 'sim.heartbeat', 'DELETE'), "
-        "has_table_privilege('debezium', 'sim.heartbeat', 'TRUNCATE')"
+        "SELECT has_table_privilege('debezium', 'dbz.heartbeat', 'SELECT'), "
+        "has_table_privilege('debezium', 'dbz.heartbeat', 'INSERT'), "
+        "has_table_privilege('debezium', 'dbz.heartbeat', 'UPDATE'), "
+        "has_table_privilege('debezium', 'dbz.heartbeat', 'DELETE'), "
+        "has_table_privilege('debezium', 'dbz.heartbeat', 'TRUNCATE')"
     ).fetchone()
     assert privs == (True, True, True, False, False), privs
-    # owned by postgres: a table owner may attach triggers, and a trigger fired by the
-    # connector's upsert would run with the debezium role (REPLICATION); shop_app owns
-    # schema sim, so ownership of this one table must not fall to it
-    owner, triggers = pg_reader.execute(
-        "SELECT tableowner, "
-        "ARRAY[has_table_privilege('shop_app', 'sim.heartbeat', 'TRIGGER'), "
-        "has_table_privilege('debezium', 'sim.heartbeat', 'TRIGGER'), "
-        "has_table_privilege('reader', 'sim.heartbeat', 'TRIGGER')] "
-        "FROM pg_tables WHERE schemaname = 'sim' AND tablename = 'heartbeat'"
+    owners = pg_reader.execute(
+        "SELECT n.nspowner::regrole::text, c.relowner::regrole::text "
+        "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'dbz' AND c.relname = 'heartbeat'"
     ).fetchone()
-    assert owner == "postgres", owner
+    assert owners == ("postgres", "postgres"), owners
+    schema_privs = pg_reader.execute(
+        "SELECT ARRAY[has_schema_privilege('shop_app', 'dbz', 'CREATE'), "
+        "has_schema_privilege('shop_app', 'dbz', 'USAGE'), "
+        "has_schema_privilege('debezium', 'dbz', 'USAGE'), "
+        "has_schema_privilege('reader', 'dbz', 'USAGE'), "
+        "has_schema_privilege('debezium', 'sim', 'USAGE')]"
+    ).fetchone()[0]
+    assert schema_privs == [False, False, True, True, False], schema_privs
+    triggers = pg_reader.execute(
+        "SELECT ARRAY[has_table_privilege('shop_app', 'dbz.heartbeat', 'TRIGGER'), "
+        "has_table_privilege('debezium', 'dbz.heartbeat', 'TRIGGER'), "
+        "has_table_privilege('reader', 'dbz.heartbeat', 'TRIGGER')]"
+    ).fetchone()[0]
     assert triggers == [False, False, False], triggers
-    published_sim = [
-        r[0]
+    for stmt in (
+        "DROP TABLE dbz.heartbeat",
+        "CREATE TABLE dbz.shadow (id int)",
+        "ALTER TABLE dbz.heartbeat ADD COLUMN x int",
+    ):
+        with pytest.raises(errors.InsufficientPrivilege), pg_app.transaction():
+            pg_app.execute(stmt)
+    published = [
+        f"{r[0]}.{r[1]}"
         for r in pg_reader.execute(
-            "SELECT tablename FROM pg_publication_tables "
-            "WHERE pubname = 'dbz_publication' AND schemaname = 'sim'"
+            "SELECT schemaname, tablename FROM pg_publication_tables "
+            "WHERE pubname = 'dbz_publication' AND schemaname <> 'shop'"
         )
     ]
-    assert published_sim == ["heartbeat"]
+    assert published == ["dbz.heartbeat"], published
     rels = [
         r[0]
         for r in pg_reader.execute(
@@ -470,12 +487,12 @@ def test_heartbeat_table_grants_and_publication(pg_reader, pg_debezium):
         )
     ]
     assert rels == ["heartbeat"], "only the heartbeat table is added explicitly"
-    # the debezium role can run the connector's upsert and nothing more in sim
+    # the debezium role can run the connector's upsert and nothing more
     pg_debezium.execute(
-        "INSERT INTO sim.heartbeat (id, ts) VALUES (1, now()) "
+        "INSERT INTO dbz.heartbeat (id, ts) VALUES (1, now()) "
         "ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts"
     )
     with pytest.raises(errors.InsufficientPrivilege):
-        pg_debezium.execute("DELETE FROM sim.heartbeat")
+        pg_debezium.execute("DELETE FROM dbz.heartbeat")
     with pytest.raises(errors.CheckViolation):
-        pg_debezium.execute("INSERT INTO sim.heartbeat (id, ts) VALUES (2, now())")
+        pg_debezium.execute("INSERT INTO dbz.heartbeat (id, ts) VALUES (2, now())")

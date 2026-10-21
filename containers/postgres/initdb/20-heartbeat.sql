@@ -9,29 +9,28 @@
 -- is idle. The Debezium 3.6 docs require exactly this: "you must explicitly add
 -- the heartbeat table to the publication" (WAL disk space consumption).
 --
--- The schema sim itself stays out of the publication: only this one table is
--- added (pg_publication_rel), sim.sim_state and the truth views are never sent.
--- Executed once on an empty volume, as the superuser (ALTER PUBLICATION needs
--- the publication owner).
+-- Own schema dbz, owned by postgres: whoever owns the table or its schema can attach
+-- a trigger (or drop the table and recreate it with one), and a trigger fired by
+-- the connector's upsert runs with the privileges of the debezium role (LOGIN
+-- REPLICATION). sim belongs to shop_app, so the table must not live there. In dbz
+-- only postgres can create, alter or drop anything; debezium and reader get USAGE.
+-- Executed once on an empty volume, as the superuser (ALTER PUBLICATION needs the
+-- publication owner).
 
-CREATE TABLE sim.heartbeat (
+CREATE SCHEMA dbz AUTHORIZATION postgres;
+REVOKE ALL ON SCHEMA dbz FROM PUBLIC;
+GRANT USAGE ON SCHEMA dbz TO debezium, reader;
+
+CREATE TABLE dbz.heartbeat (
     id smallint PRIMARY KEY CHECK (id = 1),
     ts timestamptz NOT NULL DEFAULT now()
 );
--- Owned by postgres, NOT by shop_app: the owner of a table can attach triggers to
--- it, and a trigger fired by the connector's upsert runs with the privileges of
--- the debezium role (LOGIN REPLICATION). shop_app owns schema sim, so it could
--- still drop this table (heartbeat stops, the slot only grows; visible in the
--- slot-lag check), but it cannot run code as debezium. Nobody else gets TRIGGER.
-REVOKE ALL ON TABLE sim.heartbeat FROM PUBLIC;
-INSERT INTO sim.heartbeat (id, ts) VALUES (1, now());
+REVOKE ALL ON TABLE dbz.heartbeat FROM PUBLIC;
+INSERT INTO dbz.heartbeat (id, ts) VALUES (1, now());
 
--- The least the debezium role needs: reach the schema and upsert the one row.
--- No SELECT on anything else in sim (the default privileges grant SELECT to
--- reader only), so sim.sim_state stays invisible to the connector.
-GRANT USAGE ON SCHEMA sim TO debezium;
-GRANT SELECT, INSERT, UPDATE ON TABLE sim.heartbeat TO debezium;
--- the table is created by postgres, so the default privileges of shop_app do not apply
-GRANT SELECT ON TABLE sim.heartbeat TO reader;
+-- The least the debezium role needs: upsert the one row. It has no USAGE on sim,
+-- so sim.sim_state and the truth views stay invisible to the connector.
+GRANT SELECT, INSERT, UPDATE ON TABLE dbz.heartbeat TO debezium;
+GRANT SELECT ON TABLE dbz.heartbeat TO reader;
 
-ALTER PUBLICATION dbz_publication ADD TABLE sim.heartbeat;
+ALTER PUBLICATION dbz_publication ADD TABLE dbz.heartbeat;

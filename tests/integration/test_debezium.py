@@ -255,7 +255,7 @@ def orders_topic(topic_reader) -> TopicDump:
 
 
 def test_preload_rows_arrive_as_snapshot_reads_and_the_stream_continues_without_gap_or_duplicate(
-    orders_topic, pg_reader
+    orders_topic, pg_reader, stack
 ):
     """03 §11, §2 and 08 §14: rows loaded before the connector started (the simulator's
     preload, everything before SIM_START) arrive as op=r in one consistent snapshot;
@@ -296,6 +296,24 @@ def test_preload_rows_arrive_as_snapshot_reads_and_the_stream_continues_without_
             assert ops.index("r") == 0, (k, ops)
         if "c" in ops:
             assert ops.index("c") == 0, (k, ops)
+    # exactly one op=r per preload order: provable only where the cleaner never ran (it may
+    # have dropped the `r` of a row updated later). The checkpoint is read AFTER the dump,
+    # and it only grows, so "never cleaned now" implies "complete when dumped". On a fresh
+    # stack (< segment.ms = 1 h) that is every partition, so reads == preload exactly.
+    cleaned = cdc.cleaned_offsets(stack)
+    t = orders_topic.end.topic
+    intact = {p for p in orders_topic.end.high if cleaned.get(f"{t}-{p}", 0) == 0}
+    exact = {k for k in preload if groups[k][0].partition in intact}
+    print(
+        f"\nsnapshot: {len(reads)} op=r keys, {len(preload)} preload orders; exact check on "
+        f"never-compacted partitions {sorted(intact)}: {len(exact)} orders"
+    )
+    not_read = sorted(k for k in exact if [r.op for r in groups[k]].count("r") != 1)
+    assert not_read == [], (
+        f"{len(not_read)} preload orders without exactly one op=r: {not_read[:5]}"
+    )
+    if intact == set(orders_topic.end.high):
+        assert reads == preload
     # the snapshot phase precedes the stream in every partition, with the right flags
     for partition in {r.partition for r in orders_topic}:
         ops = [r for r in orders_topic if r.partition == partition]
@@ -336,6 +354,8 @@ def _multi_event_orders(records) -> list[list[Record]]:
     ]
 
 
+# slow: polls a full read of olist.shop.orders every 20 s (62 s measured)
+@pytest.mark.slow
 def test_changes_of_one_row_stay_in_one_partition_in_lsn_order(topic_reader):
     """04 §8/§4: all events of one key hash to the same partition and keep their order
     (offsets increase with source.lsn); an INSERT or snapshot read only ever comes first.
@@ -517,12 +537,15 @@ def test_incompatible_type_change_is_rejected_and_the_connector_fails_then_recov
 
 
 # --- heartbeat ------------------------------------------------------------------------------
+# slow: needs two heartbeat records 10 s apart after an upsert (24 s measured)
+@pytest.mark.slow
 def test_heartbeat_writes_the_sim_table_and_feeds_the_heartbeat_topic(pg_reader, topic_reader):
-    """03 §7, 02 §5: every 10 s the connector upserts sim.heartbeat (heartbeat.action.query)
-    and emits a record to __debezium-heartbeat.olist (key serverName=olist, value ts_ms)."""
-    ts0 = pg_reader.execute("SELECT ts FROM sim.heartbeat WHERE id = 1").fetchone()[0]
+    """03 §7, 02 §5: every 10 s the connector upserts dbz.heartbeat (heartbeat.action.query;
+    the test id predates the move out of schema sim) and emits a record to
+    __debezium-heartbeat.olist (key serverName=olist, value ts_ms)."""
+    ts0 = pg_reader.execute("SELECT ts FROM dbz.heartbeat WHERE id = 1").fetchone()[0]
     wait_until(
-        lambda: pg_reader.execute("SELECT ts FROM sim.heartbeat WHERE id = 1").fetchone()[0] > ts0,
+        lambda: pg_reader.execute("SELECT ts FROM dbz.heartbeat WHERE id = 1").fetchone()[0] > ts0,
         timeout=30,
         desc="heartbeat.action.query ran",
     )
@@ -549,15 +572,15 @@ def test_heartbeat_advances_the_slot_while_shop_is_idle(stack, pg_reader, settin
         # confirming anything past it can only come from WAL written during the silence,
         # i.e. the heartbeat upsert; merely draining the backlog cannot get there
         silent_from = cdc.lsn_to_int(cdc.slot_state(pg_reader)["current_lsn"])
-        hb0 = pg_reader.execute("SELECT ts FROM sim.heartbeat").fetchone()[0]
+        hb0 = pg_reader.execute("SELECT ts FROM dbz.heartbeat").fetchone()[0]
         advanced = wait_until(
             lambda: cdc.lsn_to_int(cdc.slot_state(pg_reader)["confirmed_flush_lsn"]) > silent_from,
-            timeout=150,
+            timeout=60,  # heartbeat every 10 s + offset flush every 5 s, with margin
             every=2,
             desc="confirmed_flush_lsn passed the WAL position of the last shop change",
         )
         assert advanced
-        assert pg_reader.execute("SELECT ts FROM sim.heartbeat").fetchone()[0] > hb0
+        assert pg_reader.execute("SELECT ts FROM dbz.heartbeat").fetchone()[0] > hb0
         assert cdc.slot_state(pg_reader)["active"] is True, first
     finally:
         stack.run("up", "-d", "--no-deps", "simulator")
@@ -575,8 +598,8 @@ def test_cdc_latency_and_slot_lag_at_defaults(topic_reader, pg_reader):
     (at most) 200 streamed orders events committed within five minutes of the newest one:
     Debezium delay = ts_ms − source.ts_ms (commit → connector), Kafka delay = record
     timestamp − source.ts_ms (commit → appended to the log). Waits until 50 such events
-    exist (fresh stack). The slot lag stays a few MB (offsets flushed every 60 s). A task
-    restart shortly before (re-delivery of up to 60 s of WAL, 03 §9) would show up as
+    exist (fresh stack). The slot lag stays small (offsets flushed every 5 s). A task
+    restart shortly before (re-delivery of up to ~5 s of WAL, 03 §9) would show up as
     seconds, which is why only fresh commits are measured. Values are printed for the docs."""
     t = topic("orders")
 
@@ -634,17 +657,27 @@ def test_probe_rows_were_removed(pg_reader, probe_lifecycle):
 
 
 def test_debezium_role_cannot_read_sim_state_even_with_heartbeat_access(pg_debezium):
-    """02 §4/§5: the heartbeat grant is minimal: USAGE on sim and the heartbeat row only."""
-    assert pg_debezium.execute("SELECT id FROM sim.heartbeat").fetchone() == (1,)
+    """02 §4/§5: the heartbeat grant is minimal: the table lives in schema dbz (owned by
+    postgres, so shop_app cannot replace it with a trigger that runs as debezium);
+    debezium has USAGE on dbz and SELECT/INSERT/UPDATE on dbz.heartbeat only, and no
+    USAGE on schema sim at all."""
+    privs = pg_debezium.execute(
+        "SELECT has_schema_privilege('sim', 'USAGE'), has_schema_privilege('dbz', 'USAGE'), "
+        "has_schema_privilege('dbz', 'CREATE'), "
+        "(SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'dbz')"
+    ).fetchone()
+    assert privs == (False, True, False, "postgres"), privs
+    assert pg_debezium.execute("SELECT id FROM dbz.heartbeat").fetchone() == (1,)
     with pytest.raises(errors.InsufficientPrivilege):
         pg_debezium.execute("SELECT phase FROM sim.sim_state")
     with pytest.raises(errors.InsufficientPrivilege):
-        pg_debezium.execute("DELETE FROM sim.heartbeat")
+        pg_debezium.execute("DELETE FROM dbz.heartbeat")
     # the connector's own statement works for the role (same text as the connector config)
     query = cdc.connector_config()["heartbeat.action.query"]
+    assert "dbz.heartbeat" in query
     pg_debezium.execute(query)
     assert pg_debezium.execute(
-        "SELECT now() - ts < interval '5 seconds' FROM sim.heartbeat"
+        "SELECT now() - ts < interval '5 seconds' FROM dbz.heartbeat"
     ).fetchone() == (True,)
 
 

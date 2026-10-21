@@ -6,7 +6,7 @@ OLIST_STAMP := $(OLIST_DIR)/.downloaded
 WAIT_HEALTHY := .claude/skills/stack-ops/scripts/wait-healthy.sh
 COMPOSE := docker compose
 
-.PHONY: help sync env up down reset ps logs lint test-unit test-integration test-integration-fresh test-e2e data clean-data
+.PHONY: help sync env up down reset ps logs lint test-unit test-integration test-integration-full test-integration-fresh test-e2e data clean-data
 
 help:
 	@echo "make sync             - create the uv venv with the test/tooling dependencies (uv sync)"
@@ -17,8 +17,9 @@ help:
 	@echo "make logs [S=svc]     - follow logs (all services or one: make logs S=connect)"
 	@echo "make lint             - ruff check + format check"
 	@echo "make test-unit        - pytest -m unit (no Docker)"
-	@echo "make test-integration - pytest -m integration (starts the containers it needs)"
-	@echo "make test-integration-fresh - same from wiped volumes (WPDB_FRESH=1; includes the 180 s startup budget test)"
+	@echo "make test-integration - fast set: pytest -m 'integration and not slow' (starts the stack if it is down)"
+	@echo "make test-integration-full  - all integration tests (incl. slow) on the running stack"
+	@echo "make test-integration-fresh - all integration tests from wiped volumes (WPDB_FRESH=1; incl. the 180 s startup budget test)"
 	@echo "make test-e2e         - pytest -m e2e on a fresh full stack (WPDB_FRESH=1)"
 	@echo "make data             - download the Olist dataset into $(OLIST_DIR)/ (skipped if present)"
 	@echo "make clean-data       - remove downloaded CSV files"
@@ -56,6 +57,9 @@ test-unit: sync
 	uv run pytest -m unit
 
 test-integration: .env sync
+	uv run pytest -m "integration and not slow"
+
+test-integration-full: .env sync
 	uv run pytest -m integration
 
 test-integration-fresh: .env sync

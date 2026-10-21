@@ -14,9 +14,10 @@ event moves. Steps without a date are skipped. Events are totally ordered by
 
 from __future__ import annotations
 
+import bisect
 import zlib
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from itertools import dropwhile
@@ -46,6 +47,14 @@ PURCHASE_COLUMN = "order_purchase_timestamp"
 REVIEW_ID = "review_id"
 REVIEW_DATE_COLUMN = "review_creation_date"
 PRICE_COLUMN = "price"
+
+# synthetic schema evolution (01 §7): one ALTER TABLE at SIM_SCHEMA_EVOLUTION_AT, then
+# every later purchase fills the new column. The event sorts before every order event of
+# the same second (order_id "" < any id), so it is part of the resume order like the rest.
+STEP_SCHEMA = 0
+SCHEMA_EVENT_ID = ""
+DELIVERY_CHANNEL_COLUMN = "delivery_channel"
+DELIVERY_CHANNELS = ("post", "courier", "pickup_point")
 
 CATALOG_TABLES = ("product_category_name_translation", "products", "sellers")
 LIFECYCLE_TABLES = ("customers", "orders", "order_items", "order_payments", "order_reviews")
@@ -91,6 +100,7 @@ class Event:
     value: str | None = None  # status: original CSV value of that column
     row: tuple[str, ...] | None = None  # review
     order: OrderData | None = None  # purchase
+    channel: str | None = None  # purchase after the schema evolution: delivery_channel value
 
     @property
     def rows(self) -> int:
@@ -210,6 +220,32 @@ def build_events(
 Cursor = tuple[datetime, str, int]
 
 
+def delivery_channel(order_id: str) -> str:
+    """Deterministic delivery_channel of an order (crc32, stable across runs and restarts)."""
+    return DELIVERY_CHANNELS[zlib.crc32(order_id.encode()) % len(DELIVERY_CHANNELS)]
+
+
+def schema_event(at: datetime) -> Event:
+    return Event(
+        at, SCHEMA_EVENT_ID, STEP_SCHEMA, "schema", 0, 0, 0, column=DELIVERY_CHANNEL_COLUMN
+    )
+
+
+def with_schema_evolution(events: list[Event], at: datetime | None) -> list[Event]:
+    """The stream with the synthetic schema evolution (01 §7): the ALTER TABLE event at `at`
+    and `channel` set on every purchase after it. `at=None` (off) returns `events` as is.
+    Pure and deterministic, so the cursor and `summarize` stay exact."""
+    if at is None:
+        return events
+    marker = schema_event(at)
+    pos = bisect.bisect_right([e.key for e in events], marker.key)
+    after = [
+        replace(e, channel=delivery_channel(e.order_id)) if e.kind == "purchase" else e
+        for e in events[pos:]
+    ]
+    return [*events[:pos], marker, *after]
+
+
 def after_cursor(events: Iterable[Event], cursor: Cursor | None) -> Iterator[Event]:
     """Events strictly after the resume position (events are sorted by key)."""
     if cursor is None:
@@ -245,6 +281,8 @@ class Summary:
     updates: int = 0
     deletes: int = 0
     events: int = 0
+    schema_evolved: bool = False  # the ALTER TABLE event was applied
+    delivery_channels: dict[str, int] | None = None  # channel → orders with it (01 §7)
     by_status: dict[str, StatusTotals] | None = None
 
     @property
@@ -255,7 +293,7 @@ class Summary:
 def summarize(events: Iterable[Event], ds: Dataset) -> Summary:
     """The database content that applying `events` (in order) produces: what an
     uninterrupted run yields, so a resumed run must match it exactly."""
-    s = Summary(by_status={})
+    s = Summary(by_status={}, delivery_channels={})
     customers: set[str] = set()
     status: dict[str, str] = {}
     live_items: dict[str, list[tuple[str, ...]]] = {}
@@ -272,6 +310,9 @@ def summarize(events: Iterable[Event], ds: Dataset) -> Summary:
             status[e.order_id] = INITIAL_STATUS
             live_items[e.order_id] = list(od.items)
             s.order_payments += len(od.payments)
+            if e.channel is not None:
+                assert s.delivery_channels is not None
+                s.delivery_channels[e.channel] = s.delivery_channels.get(e.channel, 0) + 1
         elif e.kind in ("status", "final"):
             assert e.status is not None
             status[e.order_id] = e.status
@@ -279,6 +320,8 @@ def summarize(events: Iterable[Event], ds: Dataset) -> Summary:
                 live_items[e.order_id] = []
         elif e.kind == "review":
             s.order_reviews += 1
+        elif e.kind == "schema":
+            s.schema_evolved = True
     s.customers = len(customers)
     s.orders = len(status)
     assert s.by_status is not None

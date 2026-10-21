@@ -16,6 +16,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from itertools import batched
 from pathlib import Path
 
@@ -165,6 +166,7 @@ class Simulator:
                 sim_start=cfg.sim_start,
                 sim_end=cfg.sim_end,
                 sim_speed=cfg.sim_speed,
+                schema_evolution_at=cfg.schema_evolution_at,
             )
             state = self.db.load_state()
             assert state is not None
@@ -182,8 +184,16 @@ class Simulator:
                 state.events_applied,
             )
             state = self._reconcile_window(state)
+            state = self._reconcile_schema_evolution(state)
 
-        preload, replay = ev.split_window(loaded.events, state.sim_start, cfg.sim_end)
+        if state.schema_evolution_at is not None:
+            log.info(
+                "schema evolution (01 §7): ADD COLUMN %s at %s",
+                ev.DELIVERY_CHANNEL_COLUMN,
+                state.schema_evolution_at,
+            )
+        events = ev.with_schema_evolution(loaded.events, state.schema_evolution_at)
+        preload, replay = ev.split_window(events, state.sim_start, cfg.sim_end)
         if state.phase == "preload":
             self._preload(preload, loaded.renderer, state)
             self.db.set_phase("replay")
@@ -228,6 +238,42 @@ class Simulator:
             state = self.db.load_state()
             assert state is not None
         return state
+
+    def _reconcile_schema_evolution(self, state: SimState) -> SimState:
+        """The stored moment is part of the deterministic stream. Once the cursor has passed
+        it, it is fixed (a changed or removed setting is ignored with a warning). Before
+        that, the setting may be changed or switched on/off, unless the new moment is
+        already behind the cursor (ignored with a warning: the stream cannot be rewritten)."""
+        wanted, stored = self.cfg.schema_evolution_at, state.schema_evolution_at
+        if wanted == stored:
+            return state
+        cursor = state.cursor
+
+        def passed(at: datetime) -> bool:
+            return cursor is not None and ev.schema_event(at).key <= cursor
+
+        if stored is not None and passed(stored):
+            log.warning(
+                "SIM_SCHEMA_EVOLUTION_AT=%s differs from the stored %s, which is already "
+                "applied: keeping the stored one",
+                wanted,
+                stored,
+            )
+            return state
+        if wanted is not None and passed(wanted):
+            log.warning(
+                "SIM_SCHEMA_EVOLUTION_AT=%s is behind the resume position %s: ignored",
+                wanted,
+                cursor,
+            )
+            wanted = None
+            if stored is None:
+                return state
+        log.info("schema evolution moment changed %s → %s", stored, wanted)
+        self.db.set_schema_evolution(wanted)
+        new_state = self.db.load_state()
+        assert new_state is not None
+        return new_state
 
     def _preload(self, events: list[ev.Event], renderer: Renderer, state: SimState) -> None:
         self._set_phase("preload")

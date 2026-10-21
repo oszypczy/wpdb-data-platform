@@ -50,9 +50,12 @@ CREATE TABLE {state} (
     started_at          timestamptz NOT NULL DEFAULT now(),
     preload_finished_at timestamptz,
     finished_at         timestamptz,
-    updated_at          timestamptz NOT NULL DEFAULT now()
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    schema_evolution_at timestamp
 )
 """
+# columns added after stage 1: created on start if a stage-1 sim_state lacks them
+STATE_MIGRATIONS = {"schema_evolution_at": "timestamp"}
 
 STATE_COLUMNS = (
     "phase",
@@ -67,6 +70,7 @@ STATE_COLUMNS = (
     "rows_inserted",
     "rows_updated",
     "rows_deleted",
+    "schema_evolution_at",
 )
 
 
@@ -84,6 +88,7 @@ class SimState:
     rows_inserted: int
     rows_updated: int
     rows_deleted: int
+    schema_evolution_at: datetime | None = None
 
     @property
     def cursor(self) -> Cursor | None:
@@ -172,6 +177,7 @@ class Database:
     def load_state(self) -> SimState | None:
         """The resume position, or None when the simulator has never initialized this database."""
         cols = ", ".join(STATE_COLUMNS)
+        self._migrate_state()
         try:
             row = self.conn.execute(
                 f"SELECT {cols} FROM {self.state_table} WHERE id = 1"
@@ -182,6 +188,36 @@ class Database:
         self.conn.rollback()
         return SimState(*row) if row else None
 
+    def _migrate_state(self) -> None:
+        """Add the columns a sim_state created by an older image lacks (no-op otherwise)."""
+        schema, table = self.state_table.replace('"', "").split(".")
+        present = {
+            r[0]
+            for r in self.conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s",
+                (schema, table),
+            ).fetchall()
+        }
+        self.conn.rollback()
+        missing = {c: t for c, t in STATE_MIGRATIONS.items() if present and c not in present}
+        if missing:
+            with self.conn.transaction():
+                for column, sql_type in missing.items():
+                    self.conn.execute(
+                        f"ALTER TABLE {self.state_table} ADD COLUMN IF NOT EXISTS "
+                        f"{quote_ident(column)} {sql_type}"
+                    )
+            log.info("sim_state migrated: added %s", ", ".join(missing))
+
+    def set_schema_evolution(self, at: datetime | None) -> None:
+        with self.conn.transaction():
+            self.conn.execute(
+                f"UPDATE {self.state_table} SET schema_evolution_at = %s, updated_at = now() "
+                "WHERE id = 1",
+                (at,),
+            )
+
     def initialize(
         self,
         schemas: Mapping[str, TableSchema],
@@ -191,6 +227,7 @@ class Database:
         sim_start: datetime,
         sim_end: datetime,
         sim_speed: float,
+        schema_evolution_at: datetime | None = None,
     ) -> None:
         """Tables, indexes, catalog rows, truth views and the state row: one transaction, so a
         crash in the middle leaves nothing behind and the next start begins again."""
@@ -205,9 +242,10 @@ class Database:
             conn.execute(truth_views_sql)
             conn.execute(SIM_STATE_DDL.format(state=self.state_table))
             conn.execute(
-                f"INSERT INTO {self.state_table} (id, phase, sim_start, sim_end, sim_speed) "
-                "VALUES (1, 'preload', %s, %s, %s)",
-                (sim_start, sim_end, sim_speed),
+                f"INSERT INTO {self.state_table} "
+                "(id, phase, sim_start, sim_end, sim_speed, schema_evolution_at) "
+                "VALUES (1, 'preload', %s, %s, %s, %s)",
+                (sim_start, sim_end, sim_speed, schema_evolution_at),
             )
 
     def _copy(self, table: CsvTable) -> None:

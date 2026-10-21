@@ -139,7 +139,8 @@ def captured_probe_table(stack, settings, topic_reader):
     row, its topic created by the connector's default topic.creation group. Shared by the
     topic-design and schema-evolution tests. Torn down only after the connector committed
     its offset past the table's last change (see tests/helpers/cdc.py::committed_lsn), then
-    table, subject config, subjects and topic are removed."""
+    table, subject config, subjects and topic are removed; if that wait times out the table
+    stays and the next session's fixture sweeps it (cdc.sweep_leftover_probe_tables)."""
     from tests.helpers import cdc
 
     app = clients.pg_connect("shop_app", settings["SHOP_APP_PASSWORD"])
@@ -147,6 +148,9 @@ def captured_probe_table(stack, settings, topic_reader):
     admin = clients.kafka_admin()
     registry = clients.Http(clients.SCHEMA_REGISTRY_URL)
     connect = clients.Http(clients.CONNECT_URL)
+    leftovers = cdc.sweep_leftover_probe_tables(app, connect, registry, admin)
+    if leftovers:
+        print(f"\nswept captured probe tables left by an earlier session: {leftovers}")
     probe = cdc.CapturedProbe.create(app, topic_reader, admin)
     try:
         yield probe

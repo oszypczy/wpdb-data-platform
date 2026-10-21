@@ -24,6 +24,7 @@ DEFAULTS = {
     "SIM_HEARTBEAT_FILE": "/tmp/simulator/heartbeat",
     "SIM_LOG_EVERY": "10",
     "SIM_PRELOAD_BATCH": "1000",
+    "SIM_SCHEMA_EVOLUTION_AT": "",  # off: the default run stays deterministic (01 §7)
 }
 
 
@@ -60,6 +61,7 @@ class Config:
     heartbeat_file: Path | None
     log_every: float
     preload_batch: int
+    schema_evolution_at: datetime | None = None
 
     @property
     def conninfo(self) -> dict[str, object]:
@@ -96,6 +98,7 @@ class Config:
         if end <= start:
             raise ConfigError(f"SIM_END ({end}) must be after SIM_START ({start})")
         heartbeat = get("SIM_HEARTBEAT_FILE")
+        evolution = get("SIM_SCHEMA_EVOLUTION_AT").strip()
         return cls(
             sim_speed=speed,
             max_events_per_sec=rate,
@@ -111,4 +114,5 @@ class Config:
             heartbeat_file=Path(heartbeat) if heartbeat != "-" else None,
             log_every=log_every,
             preload_batch=batch,
+            schema_evolution_at=parse_bound(evolution, end=False) if evolution else None,
         )

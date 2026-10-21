@@ -172,6 +172,9 @@ def test_business_topics_match_the_topic_design(kafka_admin):
     assert conn["topic.creation.default.cleanup.policy"] == "compact"
 
 
+# slow: its captured_probe_table teardown waits for the connector's next offset
+# commit (offset.flush.interval.ms = 5 s) and drops the topic and subjects
+@pytest.mark.slow
 def test_new_table_gets_a_topic_from_the_default_group(
     captured_probe_table, kafka_admin, schema_registry
 ):
@@ -227,9 +230,17 @@ def test_producer_overrides_are_applied_and_zstd_compresses(connect, stack, kafk
     assert cfg["producer.override.acks"] == "all"
     assert cfg["producer.override.enable.idempotence"] == "true"
     assert cfg["producer.override.compression.type"] == "zstd"
-    logs = stack.logs("connect", tail=5000)
-    assert "compression.type = zstd" in logs, "worker did not log a producer with zstd"
-    assert "enable.idempotence = true" in logs
+    # the connector's own producer (one ProducerConfig block per task start), not any
+    # producer of the worker: idempotence and acks=all are client defaults anyway
+    client_id = f"connector-producer-{cdc.CONNECTOR}-0"
+    blocks = cdc.producer_configs(stack.logs("connect", tail="all"), client_id)
+    assert blocks, f"no ProducerConfig block for {client_id} in the connect log"
+    producer = blocks[-1]
+    assert producer["acks"] == "-1", producer["acks"]  # acks=all
+    assert producer["enable.idempotence"] == "true"
+    assert producer["compression.type"] == "zstd"
+    # zstd in the log proves the producer's codec only if the topic keeps it as written
+    assert _topic_config(kafka_admin, topic("orders"))["compression.type"] == "producer"
     # size on disk vs. uncompressed message bytes for olist.shop.orders
     from tests.helpers.kafka import TopicReader
 
@@ -336,14 +347,7 @@ def test_compaction_keeps_the_last_version_of_every_item(
         return [r for r in recs if r.key == {"order_id": k[0], "order_item_id": k[1]}]
 
     def cleaned_offsets() -> dict[str, int]:
-        out = stack.exec(
-            "kafka", "sh", "-c", "cat /var/lib/kafka/data/cleaner-offset-checkpoint 2>/dev/null"
-        ).stdout
-        return {
-            f"{line.split()[0]}-{line.split()[1]}": int(line.split()[2])
-            for line in out.splitlines()[2:]
-            if line.strip()
-        }
+        return cdc.cleaned_offsets(stack)
 
     try:
         alter(
@@ -414,10 +418,21 @@ def test_compaction_keeps_the_last_version_of_every_item(
                 latest[r.key_tuple()] = r
             missing -= set(latest)
         assert not missing, f"{len(missing)} items lost by compaction: {sorted(missing)[:3]}"
+        # a row present in the Postgres snapshot whose last Kafka record is a delete or a
+        # tombstone is legitimate only if it has been deleted in Postgres since
+        deleted = [(o, i) for o, i, _ in rows if latest[(o, i)].op in ("d", "t")]
+        resurrected = [
+            k
+            for k in deleted
+            if pg_reader.execute(
+                "SELECT 1 FROM shop.order_items WHERE order_id = %s AND order_item_id = %s", k
+            ).fetchone()
+        ]
+        assert not resurrected, f"rows in Postgres but deleted in the topic: {resurrected[:3]}"
         wrong = [
             (o, i)
             for o, i, price in rows
-            if latest[(o, i)].value is not None and latest[(o, i)].after["price"] != price
+            if latest[(o, i)].op not in ("d", "t") and latest[(o, i)].after["price"] != price
         ]
         assert not wrong, f"stale last version after compaction: {wrong[:3]}"
     finally:

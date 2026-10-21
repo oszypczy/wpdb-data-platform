@@ -100,23 +100,18 @@ def test_consumer_container_decodes_keys_and_values_through_the_registry(
     assert summary["topics"][topic("orders")]["ops"].get("r", 0) > 0
 
 
+# slow: reads every olist.shop.* topic to the end in a container (25-29 s measured)
+@pytest.mark.slow
 def test_consumer_validate_flags_only_the_bad_probe(consumer_image, stack, fresh_lifecycle):
-    """04 §6/§8: --validate on the whole stream reports zero violations on the simulator's
+    """04 §6/§8: --validate on the whole stream (every olist.shop.* topic, the default
+    --topics, read to the end of each partition) reports zero violations on the simulator's
     data; the deliberately broken probe (delivered → created, 04 §6) is caught by the
     status-transition rule and nothing else fires."""
     lc = fresh_lifecycle
-    lines = run_consumer(
-        stack,
-        "--from-beginning",
-        "--idle-timeout",
-        "8",
-        "--validate",
-        "--json",
-        "--topics",
-        ",".join(topic(t) for t in ("orders", "order_items", "order_payments", "customers")),
-    )
+    lines = run_consumer(stack, "--from-beginning", "--until-end", "--validate", "--json")
     events, summary = parse_json_lines(lines)
-    assert summary["events"] > 1000
+    assert summary["events"] > 1000 and summary["decode_errors"] == 0
+    assert {topic(t) for t in cdc.SHOP_TABLES} <= set(summary["topics"]), summary["topics"]
     flagged = [e for e in events if e["violations"]]
     assert flagged, "the bad probe must be flagged"
     for e in flagged:

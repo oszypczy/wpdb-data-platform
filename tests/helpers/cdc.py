@@ -89,7 +89,7 @@ def restart_failed_tasks(connect: Http) -> None:
 def committed_lsn(bootstrap: str | None = None) -> int | None:
     """`lsn` of the connector's last committed offset (last record of connect-offsets).
 
-    Debezium commits offsets every offset.flush.interval.ms (60 s on this worker); after a
+    Debezium commits offsets every offset.flush.interval.ms (5 s on this worker); after a
     task restart it re-reads the WAL from here, so a captured table may only be DROPPED
     once this value passed its last change (the PK of a dropped table cannot be resolved
     any more: the re-delivered event would have no key and the compacted topic rejects it).
@@ -123,7 +123,8 @@ def committed_lsn(bootstrap: str | None = None) -> int | None:
         c.close()
 
 
-def wait_committed_past(lsn: int, timeout: float = 150) -> int:
+def wait_committed_past(lsn: int, timeout: float = 60) -> int:
+    # offset.flush.interval.ms = 5 s; 60 s leaves room for a task restart in between
     def passed() -> int | None:
         committed = committed_lsn()
         return committed if committed is not None and committed >= lsn else None
@@ -157,6 +158,45 @@ def slot_state(pg: psycopg.Connection, slot: str = "debezium_slot") -> dict[str,
 def lsn_to_int(lsn: str) -> int:
     hi, lo = lsn.split("/")
     return (int(hi, 16) << 32) + int(lo, 16)
+
+
+# --- broker / worker internals read through `docker compose` -----------------------------
+def cleaned_offsets(stack) -> dict[str, int]:
+    """`<topic>-<partition>` → offset up to which the log cleaner compacted it, from the
+    broker's cleaner-offset-checkpoint. A partition missing here was never compacted, so
+    every record ever written to it is still in the log."""
+    out = stack.exec(
+        "kafka",
+        "sh",
+        "-c",
+        "cat /var/lib/kafka/data/cleaner-offset-checkpoint 2>/dev/null",
+        check=False,
+    ).stdout
+    cleaned = {}
+    for line in out.splitlines()[2:]:  # line 1 = format version, line 2 = entry count
+        parts = line.split()
+        if len(parts) == 3:
+            cleaned[f"{parts[0]}-{parts[1]}"] = int(parts[2])
+    return cleaned
+
+
+def producer_configs(logs: str, client_id: str) -> list[dict[str, str]]:
+    """Every `ProducerConfig values:` block that the Connect worker logged for `client_id`
+    (one per task start), as dicts, oldest first. `logs` is `docker compose logs` output
+    (`connect  | <TAB>acks = -1`)."""
+    blocks: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    for line in logs.splitlines():
+        body = line.split("| ", 1)[1] if "| " in line else line
+        if "ProducerConfig values:" in body:
+            current = {}
+            blocks.append(current)
+        elif current is not None and body.startswith("\t") and " = " in body:
+            k, v = body.strip().split(" = ", 1)
+            current[k] = v
+        else:
+            current = None
+    return [b for b in blocks if b.get("client.id") == client_id]
 
 
 def sim_state(pg: psycopg.Connection) -> dict[str, Any]:
@@ -370,15 +410,43 @@ class CapturedProbe:
         self.last_lsn = max(self.last_lsn, int(record.source["lsn"]))
 
     def teardown(self, app, connect: Http, registry: Http, admin, reader: TopicReader) -> None:
-        # never drop a captured table before its changes are behind the committed offset
-        try:
-            wait_committed_past(self.last_lsn)
-        finally:
-            app.execute(f"DROP TABLE IF EXISTS shop.{self.table}")
-        wait_running(connect, timeout=120)
-        registry.delete(f"/config/{self.subject}")
-        for s in (f"{self.topic}-key", self.subject):
-            if registry.delete(f"/subjects/{s}").status_code == 200:
-                registry.delete(f"/subjects/{s}", params={"permanent": "true"})
-        if self.topic in admin.list_topics(timeout=10).topics:
-            admin.delete_topics([self.topic])[self.topic].result(timeout=30)
+        # Never drop a captured table before its changes are behind the committed offset
+        # (03 §13): after a task restart Debezium re-reads the WAL from that offset and looks
+        # the table's PK up in the live catalog under the name the WAL carries, so a dropped
+        # table yields keyless records that the compacted topic rejects (task FAILED for
+        # good). Renaming it to `_…` would not help: pgoutput describes the relation with
+        # the name it had when the change was written. On a timeout the table is therefore
+        # left in place (it is harmless while it exists) and the next session sweeps it.
+        wait_committed_past(self.last_lsn)
+        drop_captured_table(app, self.table, connect, registry, admin)
+
+
+def drop_captured_table(app, table: str, connect: Http, registry: Http, admin) -> None:
+    """DROP a captured probe table whose changes are already committed by the connector,
+    then remove its subject config, subjects (permanently) and topic."""
+    t = topic(table)
+    app.execute(f"DROP TABLE IF EXISTS shop.{table}")
+    wait_running(connect, timeout=120)
+    registry.delete(f"/config/{t}-value")
+    for s in (f"{t}-key", f"{t}-value"):
+        if registry.delete(f"/subjects/{s}").status_code == 200:
+            registry.delete(f"/subjects/{s}", params={"permanent": "true"})
+    if t in admin.list_topics(timeout=10).topics:
+        admin.delete_topics([t])[t].result(timeout=30)
+
+
+def sweep_leftover_probe_tables(app, connect: Http, registry: Http, admin) -> list[str]:
+    """Drop captured probe tables an earlier session had to leave behind (teardown timed
+    out waiting for the offset commit). Waits until the connector committed past the
+    current WAL position first, which covers every change those tables ever had."""
+    rows = app.execute(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'shop' AND tablename LIKE %s",
+        (PROBE_PREFIX.replace("_", "\\_") + "%",),
+    ).fetchall()
+    leftovers = [r[0] for r in rows]
+    if leftovers:
+        now = lsn_to_int(app.execute("SELECT pg_current_wal_lsn()::text").fetchone()[0])
+        wait_committed_past(now)
+        for table in leftovers:
+            drop_captured_table(app, table, connect, registry, admin)
+    return leftovers
