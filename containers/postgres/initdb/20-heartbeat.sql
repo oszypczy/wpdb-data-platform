@@ -18,7 +18,12 @@ CREATE TABLE sim.heartbeat (
     id smallint PRIMARY KEY CHECK (id = 1),
     ts timestamptz NOT NULL DEFAULT now()
 );
-ALTER TABLE sim.heartbeat OWNER TO shop_app;
+-- Owned by postgres, NOT by shop_app: the owner of a table can attach triggers to
+-- it, and a trigger fired by the connector's upsert runs with the privileges of
+-- the debezium role (LOGIN REPLICATION). shop_app owns schema sim, so it could
+-- still drop this table (heartbeat stops, the slot only grows; visible in the
+-- slot-lag check), but it cannot run code as debezium. Nobody else gets TRIGGER.
+REVOKE ALL ON TABLE sim.heartbeat FROM PUBLIC;
 INSERT INTO sim.heartbeat (id, ts) VALUES (1, now());
 
 -- The least the debezium role needs: reach the schema and upsert the one row.

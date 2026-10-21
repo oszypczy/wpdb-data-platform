@@ -441,6 +441,18 @@ def test_heartbeat_table_grants_and_publication(pg_reader, pg_debezium):
         "has_table_privilege('debezium', 'sim.heartbeat', 'TRUNCATE')"
     ).fetchone()
     assert privs == (True, True, True, False, False), privs
+    # owned by postgres: a table owner may attach triggers, and a trigger fired by the
+    # connector's upsert would run with the debezium role (REPLICATION); shop_app owns
+    # schema sim, so ownership of this one table must not fall to it
+    owner, triggers = pg_reader.execute(
+        "SELECT tableowner, "
+        "ARRAY[has_table_privilege('shop_app', 'sim.heartbeat', 'TRIGGER'), "
+        "has_table_privilege('debezium', 'sim.heartbeat', 'TRIGGER'), "
+        "has_table_privilege('reader', 'sim.heartbeat', 'TRIGGER')] "
+        "FROM pg_tables WHERE schemaname = 'sim' AND tablename = 'heartbeat'"
+    ).fetchone()
+    assert owner == "postgres", owner
+    assert triggers == [False, False, False], triggers
     published_sim = [
         r[0]
         for r in pg_reader.execute(
