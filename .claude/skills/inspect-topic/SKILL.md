@@ -33,9 +33,26 @@ curl -s -X POST localhost:8081/compatibility/subjects/olist.shop.orders-value/ve
 ```
 
 From the host, bootstrap is `localhost:9092`; from a container, `kafka:29092`.
-The project's own consumer (`containers/kafka/consumer.py`) prints decoded events with
-validation results; use it for the "consumer decodes CDC messages" deliverable.
+The project's own consumer (`containers/consumer/`, compose service `consumer` in
+profile `tools`) prints decoded events with validation results; use it for the
+"consumer decodes CDC messages" deliverable:
+
+```bash
+docker compose run --rm consumer --from-beginning --max-messages 20 --topics olist.shop.orders
+docker compose run --rm consumer --stats                      # rates, c/u/d/r/t, lag, schema ids
+docker compose run --rm consumer --validate --from-beginning --until-end   # whole stream, then stop
+docker compose run --rm consumer --follow-order <order_id>    # lifecycle across topics
+docker compose run --rm consumer --from-beginning --max-messages 5 --json   # machine-readable
+```
+
+Topics on the stack: `olist.shop.<table>` for the 8 tables (3 partitions for
+orders/order_items/order_payments/order_reviews/customers, else 1), `olist.transaction`
+(BEGIN/END, key `{"id": "txId:lsn"}`), `__debezium-heartbeat.olist` (key `{"serverName":"olist"}`).
+Offsets of the connector itself: `connect-offsets` (JSON, last record = committed `lsn`).
 
 Checklist when verifying a Debezium topic: key = PK fields only, value envelope
-has `before`, `after`, `op`, `source.lsn`, `ts_ms`; `u` and `d` carry full `before`;
-DELETE is followed by a tombstone; subjects `<topic>-key` and `<topic>-value` exist.
+has `before`, `after`, `op`, `source.lsn`, `ts_ms`, `transaction`; `u` and `d` carry full `before`;
+DELETE is followed by a tombstone; subjects `<topic>-key` and `<topic>-value` exist;
+`price` decodes as `Decimal('58.90')`, timestamps as tz-aware UTC datetimes (logical types);
+a message's schema id (bytes 1-4) may be older than the subject's `latest` after a
+`DROP COLUMN` (decode per id, never with `latest`).

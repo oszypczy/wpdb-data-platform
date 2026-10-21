@@ -17,13 +17,13 @@ Numeracja odpowiada kolejności w przepływie danych.
 | [00-overview.md](design/00-overview.md) | Całość: decyzje, przepływ, plan prac | ✅ |
 | [architecture.drawio](design/architecture.drawio) / [.png](design/architecture.png) | Diagram C4 (poziom kontenerów): wszystkie kontenery, protokoły i kierunki przepływu | ✅ |
 | [01-business-system.md](design/01-business-system.md) | Symulator sklepu (Python), zweryfikowany na danych Olist | ✅ (zaimplementowany, etap 1: `containers/simulator/`) |
-| [02-postgresql.md](design/02-postgresql.md) | PostgreSQL | ✅ (zaimplementowany, etap 1: `containers/postgres/`: event trigger `REPLICA IDENTITY FULL`, widoki prawdy `sim.v_truth_*`, polityka indeksów FK; heartbeat w etapie 2) |
-| [03-debezium.md](design/03-debezium.md) | Debezium (Kafka Connect) | ✅ |
-| [04-kafka.md](design/04-kafka.md) | Kafka + Schema Registry | ✅ |
+| [02-postgresql.md](design/02-postgresql.md) | PostgreSQL | ✅ (zaimplementowany, etapy 1–2: `containers/postgres/`: event trigger `REPLICA IDENTITY FULL`, widoki prawdy `sim.v_truth_*`, polityka indeksów FK, tabela heartbeat `sim.heartbeat` w publikacji) |
+| [03-debezium.md](design/03-debezium.md) | Debezium (Kafka Connect) | ✅ (zaimplementowany, etap 2: `containers/connect/connectors/olist-postgres.json`: snapshot + strumień, pełna koperta, klucz = PK, typy logiczne, heartbeat, metadane transakcji, `topic.creation`; kontrakt dla Sparka w §13) |
+| [04-kafka.md](design/04-kafka.md) | Kafka + Schema Registry | ✅ (zaimplementowany, etap 2: tematy jako kod, BACKWARD, pomiar AVRO vs JSON i zstd, consumer walidujący `containers/consumer/`) |
 | [05-spark.md](design/05-spark.md) | Spark Structured Streaming | ✅ |
 | [06-minio-delta.md](design/06-minio-delta.md) | MinIO + Delta Lake | ✅ |
 | [07-dashboard.md](design/07-dashboard.md) | Dashboard Streamlit | ✅ |
-| [08-operations.md](design/08-operations.md) | Automatyzacja, niezawodność, strategia i zestaw testów (macierz wersji, start, awarie, reset, testy, CI) | ✅ (etap 0; sekcje e2e uzupełnia etap 6) |
+| [08-operations.md](design/08-operations.md) | Automatyzacja, niezawodność, strategia i zestaw testów (macierz wersji, start, awarie, reset, testy, CI) | ✅ (etapy 0–2; sekcje e2e uzupełnia etap 6) |
 | [09-agents.md](design/09-agents.md) | Zespół agentów budujących system: role, skille, MCP, orkiestracja | ✅ |
 
 ## Materiały źródłowe (`requirements/`)

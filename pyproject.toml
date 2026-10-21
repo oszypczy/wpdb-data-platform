@@ -23,8 +23,8 @@ package = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# the simulator package is importable in unit tests without installing it
-pythonpath = ["containers/simulator"]
+# the simulator and consumer packages are importable in unit tests without installing them
+pythonpath = ["containers/simulator", "containers/consumer"]
 addopts = "--strict-markers -ra"
 timeout = 600
 markers = [
@@ -43,4 +43,4 @@ extend-exclude = ["data", "docs", ".claude"]
 select = ["E", "F", "I", "W", "B", "UP"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["simulator", "tests"]
+known-first-party = ["consumer", "simulator", "tests"]

@@ -105,3 +105,51 @@ def minio(stack, settings):
         return clients.minio_client(settings[keys[0]], settings[keys[1]])
 
     return factory
+
+
+# --- stage 2: CDC (Debezium → Kafka) ----------------------------------------------
+@pytest.fixture(scope="session")
+def topic_reader(stack):
+    """AVRO-decoding reader of the olist.* topics (tests/helpers/kafka.py)."""
+    from tests.helpers.kafka import TopicReader
+
+    return TopicReader()
+
+
+@pytest.fixture(scope="session")
+def probe_lifecycle(stack, settings, topic_reader):
+    """Two synthetic orders written as shop_app through their whole lifecycle (03 §11,
+    04 §6/§8) and the records Debezium produced for them (tests/helpers/cdc.py).
+    Runs once per session; the rows are deleted again inside the lifecycle."""
+    from tests.helpers import cdc
+
+    app = clients.pg_connect("shop_app", settings["SHOP_APP_PASSWORD"])
+    app.autocommit = True
+    try:
+        cdc.cleanup_probe_rows(app)
+        cdc.wait_running(clients.Http(clients.CONNECT_URL))
+        return cdc.run_probe_lifecycle(app, topic_reader)
+    finally:
+        app.close()
+
+
+@pytest.fixture(scope="module")
+def captured_probe_table(stack, settings, topic_reader):
+    """A throw-away captured table `shop.zz_stage2_probe_<hex>` (id int PK, v text) with one
+    row, its topic created by the connector's default topic.creation group. Shared by the
+    topic-design and schema-evolution tests. Torn down only after the connector committed
+    its offset past the table's last change (see tests/helpers/cdc.py::committed_lsn), then
+    table, subject config, subjects and topic are removed."""
+    from tests.helpers import cdc
+
+    app = clients.pg_connect("shop_app", settings["SHOP_APP_PASSWORD"])
+    app.autocommit = True
+    admin = clients.kafka_admin()
+    registry = clients.Http(clients.SCHEMA_REGISTRY_URL)
+    connect = clients.Http(clients.CONNECT_URL)
+    probe = cdc.CapturedProbe.create(app, topic_reader, admin)
+    try:
+        yield probe
+    finally:
+        probe.teardown(app, connect, registry, admin, topic_reader)
+        app.close()

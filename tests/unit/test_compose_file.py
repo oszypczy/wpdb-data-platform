@@ -84,8 +84,13 @@ def test_every_long_running_service_has_healthcheck_and_restart_policy():
     init containers declare restart: "no" and depend on a healthy parent."""
     doc = yaml.safe_load(COMPOSE.read_text())
     init = {"kafka-init", "connect-init", "minio-init"}
+    tools = {"consumer"}  # profile tools: run on demand, one-shot, no healthcheck
     placeholders = {"spark", "dashboard"}  # healthchecks arrive with their stages
     for name, svc in doc["services"].items():
+        if name in tools:
+            assert svc.get("profiles") == ["tools"], f"{name}: must live in profile tools"
+            assert str(svc.get("restart")) == "no", f"{name}: tools must not restart"
+            continue
         if name in init:
             assert str(svc.get("restart")) == "no", f"{name}: init containers must not restart"
             assert svc.get("depends_on"), f"{name}: init container without depends_on"
@@ -113,6 +118,7 @@ def test_no_latest_tags():
 CONTAINERS = ROOT / "containers"
 DOCKERFILES = [
     CONTAINERS / "connect" / "Dockerfile",
+    CONTAINERS / "consumer" / "Dockerfile",
     CONTAINERS / "minio" / "Dockerfile",
     CONTAINERS / "simulator" / "Dockerfile",
 ]
@@ -154,3 +160,41 @@ def test_all_published_ports_bound_to_loopback():
             if not str(text).startswith("127.0.0.1:"):
                 offenders.append(f"{name}: {entry!r}")
     assert offenders == [], "ports not bound to loopback:\n" + "\n".join(offenders)
+
+
+def test_connect_init_waits_for_the_simulator_preload():
+    """03 §2 / 08 §14: connect-init depends on simulator: service_healthy, so the initial
+    snapshot covers the history before SIM_START and the stream continues without a gap."""
+    doc = yaml.safe_load(COMPOSE.read_text())
+    deps = doc["services"]["connect-init"]["depends_on"]
+    assert deps["simulator"] == {"condition": "service_healthy"}
+    assert deps["connect"] == {"condition": "service_healthy"}
+
+
+def test_connector_json_is_pure_json_with_env_secret_and_topic_groups():
+    """03 §8, §10 / 04 §3, §7: the connector file parses as JSON (no // comments), the
+    password is a ${env:…} placeholder, topics come from topic.creation groups and the
+    producer overrides of 04 §7 are present."""
+    import json
+
+    cfg = json.loads((CONTAINERS / "connect" / "connectors" / "olist-postgres.json").read_text())
+    assert cfg["database.password"] == "${env:DEBEZIUM_DB_PASSWORD}"
+    assert not any("password" in k and v != "${env:DEBEZIUM_DB_PASSWORD}" for k, v in cfg.items())
+    assert cfg["connector.class"] == "io.debezium.connector.postgresql.PostgresConnector"
+    assert cfg["topic.prefix"] == "olist" and cfg["schema.include.list"] == "shop"
+    assert cfg["table.exclude.list"] == r"shop\._.*"  # `_…` tables are test probes
+    assert cfg["snapshot.mode"] == "initial"
+    assert cfg["decimal.handling.mode"] == "precise" and cfg["time.precision.mode"] == "connect"
+    assert cfg["tombstones.on.delete"] == "true"
+    assert cfg["provide.transaction.metadata"] == "true"
+    assert (
+        cfg["heartbeat.interval.ms"] == "10000" and "sim.heartbeat" in cfg["heartbeat.action.query"]
+    )
+    groups = cfg["topic.creation.groups"].split(",")
+    assert groups == ["large", "transaction", "heartbeat"]
+    for g in groups:
+        assert cfg[f"topic.creation.{g}.include"], g
+    assert cfg["topic.creation.default.replication.factor"] == "1"
+    assert cfg["producer.override.acks"] == "all"
+    assert cfg["producer.override.enable.idempotence"] == "true"
+    assert cfg["producer.override.compression.type"] == "zstd"

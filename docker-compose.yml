@@ -211,10 +211,40 @@ services:
     depends_on:
       connect:
         condition: service_healthy
+      # stage 2 (03 §2, 08 §14): the simulator is healthy only after its preload, so the
+      # connector's initial snapshot covers the whole history before SIM_START (op=r)
+      # and the stream takes over from the slot's consistent point without a gap
+      simulator:
+        condition: service_healthy
     deploy:
       resources:
         limits:
           memory: 128m
+    networks: [wpdb]
+
+  # ---------------------------------------------------- validating AVRO consumer (tools)
+  # Stage 2 (04 §6): on demand only, e.g. `docker compose run --rm consumer --stats`.
+  # Own consumer group, never commits when reading --from-beginning; depends only on
+  # Kafka and Schema Registry (never on Postgres).
+  consumer:
+    build:
+      context: ./containers/consumer
+    image: wpdb/consumer
+    container_name: consumer
+    restart: "no"
+    profiles: [tools]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256m
     networks: [wpdb]
 
   # --------------------------------------------------------------------- MinIO

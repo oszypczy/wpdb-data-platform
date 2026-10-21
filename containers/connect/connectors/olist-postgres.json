@@ -1,0 +1,55 @@
+{
+  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "tasks.max": "1",
+
+  "database.hostname": "postgres",
+  "database.port": "5432",
+  "database.dbname": "shop",
+  "database.user": "debezium",
+  "database.password": "${env:DEBEZIUM_DB_PASSWORD}",
+
+  "topic.prefix": "olist",
+  "plugin.name": "pgoutput",
+  "slot.name": "debezium_slot",
+  "publication.name": "dbz_publication",
+  "publication.autocreate.mode": "disabled",
+  "schema.include.list": "shop",
+  "table.exclude.list": "shop\\._.*",
+
+  "snapshot.mode": "initial",
+  "tombstones.on.delete": "true",
+  "decimal.handling.mode": "precise",
+  "time.precision.mode": "connect",
+
+  "heartbeat.interval.ms": "10000",
+  "heartbeat.action.query": "INSERT INTO sim.heartbeat (id, ts) VALUES (1, now()) ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts",
+  "provide.transaction.metadata": "true",
+
+  "key.converter": "io.confluent.connect.avro.AvroConverter",
+  "key.converter.schema.registry.url": "http://schema-registry:8081",
+  "value.converter": "io.confluent.connect.avro.AvroConverter",
+  "value.converter.schema.registry.url": "http://schema-registry:8081",
+
+  "producer.override.acks": "all",
+  "producer.override.enable.idempotence": "true",
+  "producer.override.compression.type": "zstd",
+
+  "topic.creation.enable": "true",
+  "topic.creation.groups": "large,transaction,heartbeat",
+  "topic.creation.default.replication.factor": "1",
+  "topic.creation.default.partitions": "1",
+  "topic.creation.default.cleanup.policy": "compact",
+  "topic.creation.default.segment.ms": "3600000",
+  "topic.creation.large.include": "olist\\.shop\\.(orders|order_items|order_payments|order_reviews|customers)",
+  "topic.creation.large.partitions": "3",
+  "topic.creation.large.cleanup.policy": "compact",
+  "topic.creation.large.segment.ms": "3600000",
+  "topic.creation.transaction.include": "olist\\.transaction",
+  "topic.creation.transaction.partitions": "1",
+  "topic.creation.transaction.cleanup.policy": "delete",
+  "topic.creation.transaction.retention.ms": "86400000",
+  "topic.creation.heartbeat.include": "__debezium-heartbeat\\.olist",
+  "topic.creation.heartbeat.partitions": "1",
+  "topic.creation.heartbeat.cleanup.policy": "delete",
+  "topic.creation.heartbeat.retention.ms": "3600000"
+}

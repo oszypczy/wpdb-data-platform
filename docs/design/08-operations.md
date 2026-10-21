@@ -2,7 +2,7 @@
 
 Ten dokument opisuje, jak cały system wstaje jednym `docker compose up`, jak się zachowuje przy awariach, jak go resetować i jak uruchamiać testy. Właściciel: `platform-devops` (razem z `qa-engineer` dla sekcji o testach). Kontrakt nazw usług i portów jest w skillu `stack-ops` (`.claude/skills/stack-ops/SKILL.md`); ten dokument i skill zmieniają się razem.
 
-Stan: **etap 0 ukończony 2026-10-20** (infrastruktura: Postgres, Kafka, Schema Registry, Connect, MinIO, kontenery startowe, harness testów, CI); **etap 1 (symulator + PostgreSQL) zaimplementowany 2026-10-20**, usługa `simulator` startuje domyślnie. Sekcje dotyczące dalszego potoku (Spark, dashboard, testy e2e z awariami) są uzupełniane w kolejnych etapach.
+Stan: **etap 0 ukończony 2026-10-20** (infrastruktura: Postgres, Kafka, Schema Registry, Connect, MinIO, kontenery startowe, harness testów, CI); **etap 1 (symulator + PostgreSQL) zaimplementowany 2026-10-20**, usługa `simulator` startuje domyślnie; **etap 2 (Debezium + Kafka + Schema Registry + consumer) zaimplementowany 2026-10-20**: konektor `olist-postgres` rejestrowany po preloadzie, tematy `olist.*` z `topic.creation`, usługa `consumer` w profilu `tools`. Sekcje dotyczące dalszego potoku (Spark, dashboard, testy e2e z awariami) są uzupełniane w kolejnych etapach.
 
 ## 1. Macierz wersji
 
@@ -18,6 +18,8 @@ Procedura: skill `version-matrix`. Kotwica linii Kafki to Debezium: `connect:3.6
 | Kafka Connect: sekrety | `org.apache.kafka.common.config.provider.EnvVarConfigProvider` | w Kafce 4.3 | `${env:DEBEZIUM_DB_PASSWORD}` w JSON konektora | [Kafka KIP-887](https://cwiki.apache.org/confluence/display/KAFKA/KIP-887) |
 | MinIO + mc | własny `wpdb/minio` ze źródeł | `minio` `RELEASE.2025-10-15T17-29-55Z`, `mc` `RELEASE.2025-08-13T08-35-41Z` | builder `golang:1.24.13-bookworm` (`go.mod` minio: `go 1.24.0`, mc: `go 1.23.0`), runtime `debian:bookworm-slim` | §13; test `test_minio.py::test_server_version_matches_pinned_tag` |
 | curl (connect-init) | `curlimages/curl` | `8.17.0` | busybox `sh`, bez `jq` (skrypt używa `grep`) | `docker run … curl --version` |
+| Consumer (etap 2) | `wpdb/consumer` z `python:3.12.15-slim-bookworm` + `uv` `0.9.18`; `confluent-kafka[avro]` `2.16.0` (librdkafka 2.16.0), `cryptography` **`46.0.7`** (przypięta jawnie) | | `cryptography` ≥ 47.0.0 (zależność `authlib` ← klient Schema Registry) pada z `SIGILL` przy imporcie w VM Docker Desktop na Apple Silicon (linuxkit 6.10.11, aarch64); sprawdzone 46.0.5 ✅, 46.0.7 ✅, 47.0.0–50.0.2 ❌; na hoście (macOS) problem nie występuje | `containers/consumer/pyproject.toml`, `uv.lock`; test `test_consumer.py::test_consumer_container_decodes_keys_and_values_through_the_registry` |
+| Debezium ↔ konwerter ↔ rejestr (etap 2) | konektor `io.debezium.connector.postgresql.PostgresConnector` `3.6.3.Final`, `kafka-connect-avro-converter` `8.3.2`, `cp-schema-registry` `8.3.2` | | snapshot, strumień, rejestracja subjectów, ewolucja i odrzucenie niezgodnej zmiany, `topic.creation`, `producer.override` z `zstd` działają razem | `tests/integration/test_debezium.py`, `test_kafka.py`, `test_schema_registry.py` (§10) |
 | Python w kontenerach | `python` | `3.12.15-slim-bookworm` | PySpark 3.5 nie wspiera 3.13; `kafka-python==2.0.2` pada na ≥ 3.12, więc `confluent-kafka` | [spark.apache.org/docs/3.5.9](https://spark.apache.org/docs/3.5.9/) „Python 3.8+”; `pyproject.toml` |
 | Python na hoście | uv-managed CPython | `3.12.x` (`.python-version`) | jak wyżej; host 3.13/3.14 nie jest używany do venv projektu | `uv python install 3.12` |
 | Biblioteki testów (root `pyproject.toml`) | `pytest` `9.1.1`, `pytest-timeout` `2.4.0`, `psycopg[binary]` `3.3.6`, `confluent-kafka[avro]` `2.16.0`, `requests` `2.34.2`, `boto3` `1.43.115`, `python-dotenv` `1.2.4`, `pyyaml` `6.0.3`, `ruff` `0.17.1` | | koła `cp312` `macosx_arm64`/`manylinux` na PyPI | `uv.lock` |
@@ -35,10 +37,11 @@ Zasady: żadnego `latest` (test `test_compose_file.py::test_no_latest_tags`); we
 `docker compose up -d --build` uruchamia wszystko naraz; kolejność wymusza `depends_on` z warunkiem `service_healthy` (usługi) lub `service_completed_successfully` (kontenery startowe). Nigdzie nie ma `sleep`.
 
 ```
-postgres ──► simulator (healthy = preload zakończony)
-postgres ──────────────────────────────────────────────┐
+postgres ──► simulator (healthy = preload zakończony) ─────────────┐
+postgres ──────────────────────────────────────────────┐           │
 kafka ──► kafka-init ──► schema-registry ──────────────┼──► connect ──► connect-init
 minio ──► minio-init                                   │
+                              (profil tools, na żądanie)   kafka + schema-registry ──► consumer
                               (profil pipeline, etapy 3–5)
 kafka + schema-registry + minio-init ──► spark        minio-init ──► dashboard
 ```
@@ -50,8 +53,9 @@ kafka + schema-registry + minio-init ──► spark        minio-init ──►
 | 2 | `minio-init` | `minio` healthy | exit 0 po kubełkach, politykach, kontach |
 | 3 | `schema-registry` | `kafka` healthy, `kafka-init` exit 0 | `GET /subjects` |
 | 4 | `connect` | `kafka`, `schema-registry`, `postgres` healthy; `kafka-init` exit 0 | `GET /connectors` |
-| 5 | `connect-init` | `connect` healthy | exit 0 (bez plików w `containers/connect/connectors/`: „no connectors to register”) |
-| 2 | `simulator` | `postgres` healthy; `data/olist/*.csv` na hoście (`make up` wywołuje `make data`) | `healthcheck.py`: plik heartbeat < 30 s **i** faza `replay`/`done` (po preloadzie; `start_period` 120 s); w etapie 2 `connect-init` ma dostać `depends_on: simulator: service_healthy` (§14) |
+| 5 | `connect-init` | `connect` **i `simulator`** healthy (etap 2: snapshot dopiero po preloadzie, 03 §2) | exit 0 po `PUT /connectors/olist-postgres/config` i `RUNNING` konektora oraz zadania (timeout 120 s) |
+| 2 | `simulator` | `postgres` healthy; `data/olist/*.csv` na hoście (`make up` wywołuje `make data`) | `healthcheck.py`: plik heartbeat < 30 s **i** faza `replay`/`done` (po preloadzie; `start_period` 120 s) |
+| – | `consumer` (profil `tools`) | `kafka`, `schema-registry` healthy | nie startuje z `make up`; `docker compose run --rm consumer …` (04 §6) |
 
 **Zmierzony czas do „all services healthy”** (Apple Silicon, 8 CPU, 9.7 GB RAM dla Dockera, obrazy już zbudowane i pobrane): patrz §2.1. Budżet w teście `test_stack.py::test_fresh_stack_healthy_within_budget`: ≤ 180 s od `down -v`.
 
@@ -62,8 +66,10 @@ kafka + schema-registry + minio-init ──► spark        minio-init ──►
 | pierwszy build obrazów `wpdb/minio` (Go ze źródeł, cache BuildKit) i `wpdb/connect` | 1 min 54 s |
 | `make reset && make up` (pobrane obrazy, zbudowane obrazy, puste wolumeny) | **47 s** do „all services healthy” (initdb Postgresa, format KRaft, 3 kontenery startowe); test `test_fresh_stack_healthy_within_budget` przeszedł z budżetem 180 s. **Z symulatorem (etap 1): 48 s** (wczytanie CSV + detekcja + budowa zdarzeń ≈ 10 s, init jednej transakcji 0,2 s, preload 2016 r. 0,07 s) |
 | `make down && make up` (istniejące wolumeny) | **47 s**: czas zdominowany przez `start_period` i interwały healthchecków (10 s), nie przez pracę kontenerów |
-| `make test-integration` na działającym stosie | ok. 2 min 50 s (50 testów po etapie 1, w tym testy symulatora z restartami kontenera; 1 pomijany bez `WPDB_FRESH=1`); w etapie 0 było 32 s / 31 testów |
-| `make test-integration-fresh` (`down -v` + start + wszystkie testy) | ok. 3 min 30 s (etap 0: 69 s) |
+| `make test-integration` na działającym stosie | etap 2: **82 testy + 1 pominięty, 6,5–9,5 min** (dwa przebiegi z rzędu; testy `slow` etapu 2: kompaktowanie ≈ 1–2 min, heartbeat przy zatrzymanym symulatorze ≈ 1 min, niezgodna zmiana typu z zapisem offsetu ≤ 60 s); etap 1: ok. 2 min 50 s / 50 testów; etap 0: 32 s / 31 testów |
+| `make test-integration-fresh` (`down -v` + start + wszystkie testy) | etap 1: ok. 3 min 30 s (etap 0: 69 s) |
+| `make reset && make up` z konektorem (etap 2) | **56 s** do „all services healthy” (connect-init czeka na preload symulatora, rejestracja + snapshot okna domyślnego ≈ 12 s; budżet 180 s testu `test_fresh_stack_healthy_within_budget` zachowany) |
+| opóźnienie CDC (commit → rekord w Kafce) | mediana ≈ 0,45 s, p95 ≈ 0,8 s (03 §13) |
 
 ## 3. Healthchecki
 
@@ -81,7 +87,7 @@ Tabela jest kopią kontraktu ze skillu `stack-ops`; wszystkie healthchecki mają
 | `dashboard` (etap 5) | – | `127.0.0.1:8501` | `curl -f :8501/_stcore/health` |
 | `kafka-init`, `minio-init`, `connect-init` | – | – | kod wyjścia 0 |
 
-Skrypt `.claude/skills/stack-ops/scripts/wait-healthy.sh [timeout]` blokuje, aż każda usługa jest `healthy` i każdy kontener startowy wyszedł z kodem 0; `tests/helpers/compose.py::ComposeStack.wait_healthy` to jego port w Pythonie.
+Skrypt `.claude/skills/stack-ops/scripts/wait-healthy.sh [timeout]` blokuje, aż każda usługa jest `healthy` i każdy kontener startowy wyszedł z kodem 0; `tests/helpers/compose.py::ComposeStack.wait_healthy` to jego port w Pythonie. **Poprawka etapu 2:** działający kontener `*-init` (bez healthchecku) nie jest już traktowany jak gotowy: `docker compose up -d` uruchamia kontenery startowe ponownie, a `connect-init` od etapu 2 trwa kilka sekund (czeka na `RUNNING`), więc testy startowały, zanim skończył (`test_connect.py::test_connect_init_registered_the_connector` widział stan `running`).
 
 **Wszystkie porty hosta są publikowane tylko na `127.0.0.1`** (wynik przeglądu bezpieczeństwa etapu 0). Stos jest laboratorium na jednej maszynie; bez tego ograniczenia każdy w sieci lokalnej mógłby przez REST Connecta (`:8083`) zarejestrować konektor i, dzięki `config.providers=env`, odczytać `DEBEZIUM_DB_PASSWORD`, a przez `:5432`/`:9092` czytać bazę i tematy. Listener `EXTERNAL` Kafki i tak ogłasza `localhost:9092`, więc nic poza adresem wiązania się nie zmienia. Test: `test_compose_file.py::test_all_published_ports_bound_to_loopback`.
 
@@ -95,7 +101,7 @@ Dwa listenery Kafki (naprawa błędu z tutoriali): `INTERNAL://kafka:29092` dla 
 |---|---|---|---|
 | `kafka-init` | `cp-kafka` (ten sam, co broker) | tematy wewnętrzne z `containers/kafka/topics.txt` (`connect-configs/offsets/status`, `_schemas`; 1 partycja, compact) | `--create --if-not-exists`; istniejący temat o innych parametrach jest tylko opisany, nie zmieniany |
 | `minio-init` | `wpdb/minio` (ma `mc`) | kubełki `bronze silver gold ops checkpoints`, polityki `spark`/`dashboard` z `containers/minio/policies/*.json`, konta `spark` (RW wszędzie) i `dashboard` (RO `gold`, `ops`) | `mc mb --ignore-existing`; `mc admin policy create` i `mc admin user add` nadpisują; `mc admin policy attach` jest strzeżone przez `mc admin user info --json` (ponowne `attach` zwróciłoby błąd) |
-| `connect-init` | `curlimages/curl` | `PUT /connectors/<nazwa>/config` dla każdego `containers/connect/connectors/*.json`, czeka na `RUNNING` (timeout 120 s) | `PUT` tworzy lub aktualizuje (tutorialowy `POST` dałby 409); bez plików loguje „no connectors to register” i kończy się kodem 0 |
+| `connect-init` | `curlimages/curl` | `PUT /connectors/<nazwa>/config` dla każdego `containers/connect/connectors/*.json` (etap 2: `olist-postgres`), czeka na `RUNNING` (timeout 120 s); startuje dopiero po zdrowym `simulator` (preload) | `PUT` tworzy lub aktualizuje (tutorialowy `POST` dałby 409); ta sama konfiguracja = brak restartu zadań; zmieniona = Connect przeładowuje konektor; bez plików loguje „no connectors to register” i kończy się kodem 0 |
 
 Ponowne uruchomienie jednego kontenera startowego: `docker compose up -d --force-recreate --no-deps <nazwa>`; w testach `ComposeStack.rerun_init(nazwa)`. Test: `test_stack.py::test_init_container_idempotent[kafka-init|minio-init|connect-init]` (stan przed i po jest identyczny, kod 0).
 
@@ -108,7 +114,7 @@ Usługi długotrwałe mają `restart: unless-stopped`; kontenery startowe mają 
 | `postgres` | symulator traci połączenie, Debezium traci slot; WAL i slot są w `pg_data` | Docker restartuje; symulator wznawia od `sim.sim_state` (01 §6), Debezium łączy się ponownie i czyta od `confirmed_flush_lsn` | e2e, etap 6 |
 | `kafka` | Connect i Spark dostają błędy producenta/konsumenta i ponawiają; log jest w `kafka_data`, `CLUSTER_ID` stały, więc broker wstaje na tych samych danych | Docker restartuje; Debezium wznawia z `connect-offsets`, Spark z checkpointu | e2e „kill brokera” (04 §8), etap 6 |
 | `schema-registry` | rejestr jest bezstanowy: schematy są w temacie `_schemas` | Docker restartuje; klienci (konwerter, Spark) ponawiają żądania HTTP | e2e, etap 6 |
-| `connect` | zdarzenia nie płyną; slot w Postgresie trzyma WAL (limit `max_slot_wal_keep_size=2GB`) | Docker restartuje; Debezium wznawia od offsetu z `connect-offsets`, slot się domyka; dostarczanie co najmniej raz + idempotentny MERGE w Sparku | e2e „kill connect” (03 §11), etap 6 |
+| `connect` | zdarzenia nie płyną; slot w Postgresie trzyma WAL (limit `max_slot_wal_keep_size=2GB`) | Docker restartuje; Debezium wznawia od offsetu z `connect-offsets` (zapis co 60 s, więc do 60 s zdarzeń przychodzi ponownie), slot się domyka; dostarczanie co najmniej raz + idempotentny MERGE w Sparku | e2e „kill connect” (03 §11), etap 6; restart samego zadania po `FAILED`: integracyjny `test_debezium.py::test_incompatible_type_change_is_rejected_and_the_connector_fails_then_recovers` ✅ |
 | `minio` | Spark nie może zapisać; ponawia (S3A retry); dane w `minio_data` | Docker restartuje | e2e „restart MinIO” (06 §11), etap 6 |
 | `spark` | przetwarzanie staje; checkpointy w kubełku `checkpoints`, więc kontener jest bezstanowy | Docker restartuje; strumienie wznawiają z checkpointów | e2e (06 §11), etap 6 |
 | `simulator` | brak nowych zdarzeń; kursor w `sim.sim_state` zapisany w tej samej transakcji co dane | `docker compose up -d simulator`; wznowienie od kursora bez duplikatów i strat (01 §5) | integracyjny: `test_simulator.py::test_kill_and_restart_resumes_from_sim_state_without_duplicates` ✅; e2e z uzgadnianiem silver: etap 6 |
@@ -154,6 +160,7 @@ Wszystkie zmienne są w `.env.example` z komentarzem; `make up` kopiuje go do `.
 | MinIO | `MINIO_ROOT_USER/PASSWORD`, `MINIO_SPARK_ACCESS_KEY/SECRET_KEY`, `MINIO_DASHBOARD_ACCESS_KEY/SECRET_KEY`, `MINIO_AGENT_ACCESS_KEY/SECRET_KEY` (tylko odczyt, MCP `duckdb` i testy) | `minio`, `minio-init`, Spark, dashboard, testy, MCP `duckdb` |
 | Kafka | `KAFKA_CLUSTER_ID` | formatowanie wolumenu KRaft (stałe ID = broker wstaje na istniejących danych) |
 | Symulator | `SIM_SPEED`, `MAX_EVENTS_PER_SEC`, `SIM_START`, `SIM_END` (domyślnie 1440 / 20 / 2017-01-05 / 2017-03-31, 01 §4) | `simulator`; e2e nadpisują je przy starcie stosu |
+| Consumer | `KAFKA_BOOTSTRAP`, `SCHEMA_REGISTRY_URL` (w compose `kafka:29092`, `http://schema-registry:8081`; z hosta domyślnie `localhost:9092`, `http://localhost:8081`) | `consumer` (profil `tools`) |
 
 Pułapka compose: w `command:`/`entrypoint:` `${VAR}` jest podstawiane z `.env` hosta przy parsowaniu; wartość z kontenera wymaga `$$VAR`. Test `test_compose_file.py::test_commands_use_double_dollar`.
 
@@ -203,7 +210,6 @@ Status: ✅ przechodzi, ⏳ zaplanowany (etap). Wiersze etapu 0 z planu `qa-engi
 | 04 §1 | `/subjects` odpowiada; rejestr w `_schemas`; tryb READWRITE | integracyjny | `tests/integration/test_schema_registry.py::test_subjects_endpoint`, `::test_registry_stores_schemas_in__schemas_topic`, `::test_mode_is_readwrite` | ✅ |
 | 04 §5 | zgodność globalna BACKWARD | integracyjny | `test_schema_registry.py::test_global_compatibility_backward` | ✅ |
 | 03 §1 | Connect ma konwerter AVRO (`/connector-plugins?connectorsOnly=false`) i konektor Debezium Postgres 3.6.3 | integracyjny | `tests/integration/test_connect.py::test_plugins_include_avro_converter`, `::test_plugins_include_debezium_postgres` | ✅ |
-| 03 §8 | `connect-init` bez konektora: exit 0, `/connectors == []` | integracyjny | `test_connect.py::test_no_connectors_registered_in_stage0` | ✅ |
 | 03 §8 | worker ma `config.providers=env`, politykę override `All`, URL rejestru dla konwerterów | integracyjny | `test_connect.py::test_worker_uses_env_config_provider` | ✅ |
 | 08 §1 | Connect działa na linii Kafka 4.3 (= CP 8.3) | integracyjny | `test_connect.py::test_worker_kafka_version_matches_broker_line` | ✅ |
 | 06 §2 | kubełki `bronze silver gold ops checkpoints` istnieją (i żadne inne) | integracyjny | `tests/integration/test_minio.py::test_buckets_exist` | ✅ |
@@ -240,7 +246,28 @@ Status: ✅ przechodzi, ⏳ zaplanowany (etap). Wiersze etapu 0 z planu `qa-engi
 | 01 §4, §9 | po `SIM_END` faza `done`: kontener bezczynny i zdrowy; późniejszy `SIM_END` + restart wznawia od kursora | e2e (własny stos, okno kilku dni) | etap 6, `tests/e2e/` | ⏳ |
 | 01 §5 | stan bazy = preload + zdarzenia do kursora w czystym modelu (liczby, c/u/d, status × przychód) w jednym snapshocie | integracyjny | `test_simulator.py::test_database_state_equals_the_pure_fold_of_events_up_to_the_cursor`, `::test_sim_clock_is_a_naive_timestamp_in_the_window` | ✅ |
 | 01 §5, §8 | `kill` + restart symulatora: wznowienie od `sim_state`, bez ponownej inicjalizacji, bez duplikatów, liczby jak bez przerwy | integracyjny, `slow` | `test_simulator.py::test_kill_and_restart_resumes_from_sim_state_without_duplicates` | ✅ |
-| 03 §11, 04 §8 | zdarzenia `c/u/d/r`, klucze = PK, ewolucja schematu, heartbeat, tombstones | integracyjny | etap 2 | ⏳ |
+| 03 §8, 08 §14 | `connect-init` zależy od zdrowego symulatora; plik konektora to czysty JSON z `${env:…}`, trybami, heartbeatem, grupami `topic.creation`, nadpisaniami producenta i `table.exclude.list` | unit | `test_compose_file.py::test_connect_init_waits_for_the_simulator_preload`, `::test_connector_json_is_pure_json_with_env_secret_and_topic_groups` | ✅ |
+| 04 §6, §8 | reguły walidacji consumera, opis zdarzeń, statystyki, śledzenie zamówienia | unit | `tests/unit/test_consumer_rules.py` (27 testów) | ✅ |
+| 03 §8, §11 | konektor zarejestrowany przez `connect-init`, `RUNNING`, slot aktywny; ponowny `PUT` bez zmian; hasło nigdy w REST | integracyjny | `tests/integration/test_debezium.py::test_connector_registered_by_connect_init_and_running`, `::test_register_twice_keeps_one_connector_with_the_current_config`, `::test_password_is_never_exposed_by_the_rest_api`, `test_connect.py::test_connect_init_registered_the_connector` | ✅ |
+| 03 §1, §3, §11 | INSERT/UPDATE/DELETE → `c/u/d` z pełnym `before`, `source.lsn`, blok `transaction`, tombstone; sondy usunięte po teście | integracyjny | `test_debezium.py::test_insert_update_delete_give_c_u_d_with_full_before`, `::test_probe_rows_were_removed` | ✅ |
+| 03 §2, §11 | preload jako `op=r` (dokładnie raz), strumień bez dziury i duplikatu, `r` przed strumieniem, jeden snapshot | integracyjny | `test_debezium.py::test_preload_rows_arrive_as_snapshot_reads_and_the_stream_continues_without_gap_or_duplicate`, `::test_snapshot_time_is_recorded_in_source` | ✅ |
+| 03 §6, §11 | `decimal(10,2)` i `timestamp-millis` w rejestrze; wartości z Kafki = Postgres | integracyjny | `test_debezium.py::test_timestamps_and_decimals_are_logical_types` | ✅ |
+| 03 §4, §11 | klucz = PK każdej z 8 tabel, subject `<temat>-key`, `order_items-key` = `(order_id, order_item_id)` | integracyjny | `test_debezium.py::test_message_key_is_the_table_pk_with_its_own_subject` | ✅ |
+| 03 §4, 04 §4, §8 | zmiany jednego wiersza w jednej partycji, w kolejności LSN | integracyjny | `test_debezium.py::test_changes_of_one_row_stay_in_one_partition_in_lsn_order`, `test_kafka.py::test_changes_of_one_row_stay_in_one_partition_in_order` | ✅ |
+| 03 §5, §11; 04 §5 | `ADD COLUMN` → nowa wersja, `is_compatible: true`, `RUNNING`; po `DROP COLUMN` stary id | integracyjny | `test_debezium.py::test_add_nullable_column_gives_a_new_schema_version_and_the_connector_stays_running` | ✅ |
+| 03 §5, §11; 04 §8 | niezgodna zmiana typu → rejestr odrzuca, zadanie `FAILED`; naprawa przez `compatibility=NONE` dla subjectu + restart | integracyjny, `slow` | `test_debezium.py::test_incompatible_type_change_is_rejected_and_the_connector_fails_then_recovers` | ✅ |
+| 03 §7, §11; 02 §5 | heartbeat: upsert `sim.heartbeat`, temat heartbeat, slot przesuwa się bez ruchu w `shop`; uprawnienia roli `debezium` w `sim` | integracyjny (+`slow`) | `test_debezium.py::test_heartbeat_writes_the_sim_table_and_feeds_the_heartbeat_topic`, `::test_heartbeat_advances_the_slot_while_shop_is_idle`, `::test_debezium_role_cannot_read_sim_state_even_with_heartbeat_access`, `test_postgres.py::test_heartbeat_table_grants_and_publication` | ✅ |
+| 03 §7 | metadane transakcji: BEGIN/END, `event_count`, `data_collections`, wspólny `txId` | integracyjny | `test_debezium.py::test_purchase_transaction_metadata` | ✅ |
+| 03 §9, §13 | opóźnienie CDC i lag slotu na domyślnych ustawieniach; strumień nadąża za symulatorem | integracyjny | `test_debezium.py::test_cdc_latency_and_slot_lag_at_defaults`, `::test_stream_keeps_up_with_the_simulator` | ✅ |
+| 04 §2, §3, §8 | tematy `olist.*` z partycjami/`cleanup.policy`/retencją z projektu; nowa tabela → grupa domyślna; `_*` bez tematu | integracyjny | `test_kafka.py::test_business_topics_match_the_topic_design`, `::test_new_table_gets_a_topic_from_the_default_group` | ✅ |
+| 04 §2, §8 | DELETE → `d` + tombstone (te same bajty klucza) | integracyjny | `test_kafka.py::test_delete_gives_d_then_tombstone` | ✅ |
+| 04 §2, §8 | kompaktowanie `order_items`: każda pozycja z ostatnią wersją | integracyjny, `slow` | `test_kafka.py::test_compaction_keeps_the_last_version_of_every_item` | ✅ |
+| 04 §5, §7 | AVRO < JSON < JSON+schemat; `acks=all`/idempotencja/`zstd` przyjęte, współczynnik kompresji | integracyjny | `test_kafka.py::test_avro_messages_are_smaller_than_json_with_schema`, `::test_producer_overrides_are_applied_and_zstd_compresses` | ✅ |
+| 04 §1, §5, §8 | subjecty `<temat>-key/-value` i tylko takie; endpoint zgodności: pole nullable ✅, zmiana typu ❌, pole wymagane ❌ | integracyjny | `test_schema_registry.py::test_subjects_follow_the_topic_name_strategy`, `::test_compatibility_endpoint_accepts_nullable_field_and_rejects_type_change` | ✅ |
+| 04 §6, §8 | consumer: dekodowanie przez rejestr, `--validate` (0 naruszeń poza celową sondą), `--stats`, `--follow-order`, z hosta | integracyjny | `tests/integration/test_consumer.py::test_consumer_container_decodes_keys_and_values_through_the_registry`, `::test_consumer_validate_flags_only_the_bad_probe`, `::test_consumer_stats_mode_reports_rates_ops_lag_and_schemas`, `::test_follow_order_prints_the_lifecycle_across_topics`, `::test_consumer_runs_from_the_host_too` | ✅ |
+| 02 §9, §10 | initdb dwa razy → identyczny stan, teraz łącznie z tabelą `sim.heartbeat` w publikacji i jej uprawnieniami | integracyjny | `test_postgres.py::test_initdb_twice_gives_identical_state` (snapshot katalogu rozszerzony o `pubtable` i `grant`) | ✅ |
+| 03 §11 | `kill connect` w trakcie strumienia → wznowienie od offsetu, lag slotu do zera, uzgadnianie Postgres ↔ silver | e2e | etap 6 (wymaga silver z etapu 3; skill `fault-injection`) | ⏳ e2e |
+| 04 §8 | `kill kafka` w trakcie strumienia → Debezium i Spark wznawiają, uzgadnianie zgodne | e2e | etap 6 | ⏳ e2e |
 | 05, 06 §11 | bronze/silver/gold, time travel, CDF, OPTIMIZE/VACUUM | integracyjny | etapy 3–4 | ⏳ |
 | 02–06 (awarie) | `kill` `connect`/`kafka`/`minio`/`spark`/`simulator` → uzgadnianie Postgres ↔ silver zgodne | e2e | etap 6 (skill `fault-injection`) | ⏳ |
 
@@ -289,13 +316,16 @@ Stan na 2026-10-20 (decyzja użytkownika z etapu 0, szczegóły w [06-minio-delt
 
 ## 14. Do weryfikacji w kolejnych etapach
 
-- **Snapshot przed startem konektora** (01 §4, 03 §2): **po stronie symulatora rozstrzygnięte (etap 1)**: `simulator` startuje domyślnie (bez profilu), a jego healthcheck przechodzi dopiero po preloadzie (faza `replay`/`done` w pliku heartbeat; `sim.sim_state.phase` i `preload_finished_at` są widoczne dla `reader`). Etap 2: dodać `connect-init` zależność `depends_on: simulator: condition: service_healthy` (preload pełnej historii mieści się w `start_period` 120 s) i sprawdzić testem, że wiersze sprzed `SIM_START` przychodzą jako `op=r`, a od pierwszego zdarzenia replay jako `c/u/d` bez dziury i duplikatu.
+- **Rozstrzygnięte (etap 2): snapshot przed startem konektora** (01 §4, 03 §2): `connect-init` ma `depends_on: simulator: condition: service_healthy`; test `test_debezium.py::test_preload_rows_arrive_as_snapshot_reads_and_the_stream_continues_without_gap_or_duplicate` dowodzi `op=r` dla historii sprzed `SIM_START` i strumienia bez dziury i duplikatu.
 - **Rozstrzygnięte (etap 1): widoki `sim.v_truth_*`** leżą w `containers/postgres/sql/truth-views.sql` (zamontowany do kontenera symulatora jako `/app/sql/truth-views.sql`) i są wykonywane przez symulator jako `shop_app` w transakcji inicjalizacji; indeksy FK według 02 §7 zakłada symulator. Oba wcześniej pomijane testy przechodzą.
 - **`make up` zależy od `make data`** (symulator bez CSV nie staje się zdrowy); job CI `integration` pobiera dane przed startem stosu (`make data` z Kaggle bez logowania: do potwierdzenia na runnerze GitHub).
-- **Zdarzenia syntetyczne symulatora** (01 §7: `ALTER TABLE orders ADD COLUMN delivery_channel`, korekty cen) nie są zaimplementowane; potrzebne do testu ewolucji schematu (03 §5) w etapie 2–3.
-- **`pg_hba.conf`** domyślne z obrazu (`host all all all scram-sha-256`) obejmuje replikację; test `test_debezium_cannot_write` tworzy tymczasowy slot, pełne połączenie `pgoutput` sprawdzi etap 2.
-- **Heartbeat i tabela sygnałowa Debezium** (03 §7): jeśli mają leżeć w `sim`, rola `debezium` potrzebuje tam `INSERT/UPDATE`; dziś ma tylko `SELECT` na `shop`.
+- **Zdarzenia syntetyczne symulatora** (01 §7: `ALTER TABLE orders ADD COLUMN delivery_channel`, korekty cen) nadal nie są w symulatorze; test ewolucji schematu etapu 2 wykonuje to DDL sam jako `shop_app` (03 §5), więc dla etapu 3 nie jest to blokujące. Zostaje otwarte dla właściciela symulatora (włączane zmienną środowiskową, domyślnie wyłączone).
+- **Rozstrzygnięte (etap 2): `pg_hba.conf`** domyślne z obrazu obejmuje replikację: pełne połączenie `pgoutput` roli `debezium` działa (slot `debezium_slot` aktywny, `test_debezium.py::test_connector_registered_by_connect_init_and_running`).
+- **Rozstrzygnięte (etap 2): heartbeat** w `sim.heartbeat` (02 §5, 03 §7): tabela w publikacji, rola `debezium` ma `USAGE` na `sim` i `SELECT/INSERT/UPDATE` tylko na tej tabeli (`20-heartbeat.sql`). Tabela sygnałowa (snapshot przyrostowy) nie jest używana: odłożona (03 §2).
+- **Do decyzji `platform-devops` (etap 3 lub 6): `OFFSET_FLUSH_INTERVAL_MS`** workera Connect (domyślnie 60000): po restarcie zadania konektor powtarza do 60 s zdarzeń (03 §9); 5000 skróciłoby okno powtórek i czas oczekiwania testów, które usuwają przechwytywane tabele (`tests/helpers/cdc.py::wait_committed_past`). Exactly-once w Connect sprawdzone i świadomie nie włączone (03 §9).
+- **Snapshot przyrostowy na żądanie** (03 §2): wymaga tabeli sygnałowej w `shop` i uprawnień zapisu dla `debezium`; kandydat do etapu 6 (odtworzenie silver po awarii).
+- **Dla etapu 3 (Spark):** kontrakt tematów, kluczy i schematów w 03 §13; dekodowanie per `schema_id` z nagłówka (po `DROP COLUMN` `latest` nie opisuje najnowszych rekordów); tombstones (`value IS NULL`) do odfiltrowania; powtórki po restarcie Connecta (ten sam `source.lsn`) obsługiwane przez `MERGE`.
 - **RAM pełnego stosu** ≈ 9.5 GB przy 9.7 GB dostępnych: po etapie 3 zmierzyć i przyciąć limity Sparka i Connecta.
 - **Tematy `connect-offsets`/`connect-status` z 1 partycją**: wystarczające dla jednego workera; Connect przyjmuje istniejące tematy bez zmian.
 - **CI:** cache Go w GHA i logowanie do Docker Hub (§11).
-- **MCP `kafka`:** serwer nie ma jeszcze żadnych wiadomości do dekodowania (etap 2 to zweryfikuje na tematach `olist.*`).
+- **Rozstrzygnięte (etap 2): MCP `kafka`** dekoduje tematy `olist.*` (klucze, wartości, `Decimal` i daty jako tekst); `describe_topic` zgłaszał błąd dla tematów z 3 partycjami w trakcie etapu 2 (do sprawdzenia przez `platform-devops`; CLI `kafka-topics --describe` działa).

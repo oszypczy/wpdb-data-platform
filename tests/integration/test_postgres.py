@@ -142,7 +142,8 @@ SIM_PROBE = "sim._stage0_probe"
 
 
 def test_sim_schema_privileges(pg_reader, pg_debezium, pg_app):
-    """02 §4: reader may SELECT in sim (not write); debezium has no access to sim at all."""
+    """02 §4: reader may SELECT in sim (not write); debezium may enter sim only for the
+    heartbeat table (02 §5, stage 2) and cannot read or write anything else there."""
     pg_app.execute(f"DROP TABLE IF EXISTS {SIM_PROBE}")
     pg_app.execute(f"CREATE TABLE {SIM_PROBE} (id int PRIMARY KEY, v text)")
     pg_app.execute(f"INSERT INTO {SIM_PROBE} VALUES (1, 'a')")
@@ -157,7 +158,11 @@ def test_sim_schema_privileges(pg_reader, pg_debezium, pg_app):
         with pytest.raises(errors.InsufficientPrivilege):
             pg_debezium.execute(f"INSERT INTO {SIM_PROBE} VALUES (3, 'c')")
         assert pg_reader.execute(
-            "SELECT has_schema_privilege('debezium', 'sim', 'USAGE')"
+            "SELECT has_schema_privilege('debezium', 'sim', 'USAGE'), "
+            "has_schema_privilege('debezium', 'sim', 'CREATE')"
+        ).fetchone() == (True, False)
+        assert pg_reader.execute(
+            "SELECT has_table_privilege('debezium', 'sim.sim_state', 'SELECT')"
         ).fetchone() == (False,)
         assert pg_reader.execute(
             "SELECT has_schema_privilege('reader', 'sim', 'USAGE')"
@@ -241,6 +246,8 @@ def test_initdb_twice_gives_identical_state(stack, settings, pg_reader):
         "defacl",
         "publication",
         "pubschema",
+        "pubtable",
+        "acl",
         "eventtrigger",
         "setting",
     }, kinds
@@ -418,3 +425,45 @@ def test_delete_order_items_by_order_id_uses_index(pg_reader, pg_app):
     assert scans, f"no index scan in the DELETE plan: {plan}"
     assert any(n.get("Index Name") in candidates for n in scans), (scans, candidates)
     assert not any(n.get("Node Type") == "Seq Scan" for n in nodes), plan
+
+
+# --- stage 2 (02 §5): heartbeat table ---------------------------------------------------
+def test_heartbeat_table_grants_and_publication(pg_reader, pg_debezium):
+    """02 §5, 03 §7: sim.heartbeat (one row, id = 1) exists from initdb; debezium may
+    SELECT/INSERT/UPDATE exactly this table; it is the only sim table in dbz_publication
+    (the schema sim itself is not published); reader can read it."""
+    assert pg_reader.execute("SELECT id FROM sim.heartbeat").fetchall() == [(1,)]
+    privs = pg_reader.execute(
+        "SELECT has_table_privilege('debezium', 'sim.heartbeat', 'SELECT'), "
+        "has_table_privilege('debezium', 'sim.heartbeat', 'INSERT'), "
+        "has_table_privilege('debezium', 'sim.heartbeat', 'UPDATE'), "
+        "has_table_privilege('debezium', 'sim.heartbeat', 'DELETE'), "
+        "has_table_privilege('debezium', 'sim.heartbeat', 'TRUNCATE')"
+    ).fetchone()
+    assert privs == (True, True, True, False, False), privs
+    published_sim = [
+        r[0]
+        for r in pg_reader.execute(
+            "SELECT tablename FROM pg_publication_tables "
+            "WHERE pubname = 'dbz_publication' AND schemaname = 'sim'"
+        )
+    ]
+    assert published_sim == ["heartbeat"]
+    rels = [
+        r[0]
+        for r in pg_reader.execute(
+            "SELECT c.relname FROM pg_publication_rel pr "
+            "JOIN pg_publication p ON p.oid = pr.prpubid JOIN pg_class c ON c.oid = pr.prrelid "
+            "WHERE p.pubname = 'dbz_publication'"
+        )
+    ]
+    assert rels == ["heartbeat"], "only the heartbeat table is added explicitly"
+    # the debezium role can run the connector's upsert and nothing more in sim
+    pg_debezium.execute(
+        "INSERT INTO sim.heartbeat (id, ts) VALUES (1, now()) "
+        "ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts"
+    )
+    with pytest.raises(errors.InsufficientPrivilege):
+        pg_debezium.execute("DELETE FROM sim.heartbeat")
+    with pytest.raises(errors.CheckViolation):
+        pg_debezium.execute("INSERT INTO sim.heartbeat (id, ts) VALUES (2, now())")

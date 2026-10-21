@@ -1,7 +1,7 @@
 # kafka
 
-Topics as code and (from stage 2) the validating AVRO consumer
-(`docs/design/04-kafka.md`). Owner: `database-cdc`.
+Topics as code (`docs/design/04-kafka.md` §3). Owner: `database-cdc`. The validating
+AVRO consumer lives in `containers/consumer/` (its own compose service).
 
 | File | Purpose |
 |---|---|
@@ -10,4 +10,9 @@ Topics as code and (from stage 2) the validating AVRO consumer
 
 Broker: `confluentinc/cp-kafka` in KRaft combined mode, `auto.create.topics.enable=false`.
 Listeners: `kafka:29092` inside the compose network, `localhost:9092` from the host.
-Business topics `olist.shop.<table>` are created by Debezium (`topic.creation.*`).
+Business topics `olist.shop.<table>`, `olist.transaction` and `__debezium-heartbeat.olist`
+are created by Debezium (`topic.creation.*` groups in
+`containers/connect/connectors/olist-postgres.json`): 3 partitions + compact for the five
+big tables, 1 partition + compact for dictionaries and new tables, delete with 1 day / 1 h
+retention for transaction / heartbeat, `segment.ms=1h` on compacted topics so compaction
+actually runs in a lab. Tables named `shop._*` are excluded from capture.

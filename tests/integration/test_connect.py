@@ -34,12 +34,14 @@ def test_plugins_include_debezium_postgres(connect):
     )
 
 
-def test_no_connectors_registered_in_stage0(connect, stack):
-    """03 §8: connect-init with no connector files exits 0 and GET /connectors == []."""
+def test_connect_init_registered_the_connector(connect, stack):
+    """03 §8: connect-init registered every containers/connect/connectors/*.json with PUT
+    (stage 2: olist-postgres), waited for RUNNING and exited 0."""
     rows = {r.service: r for r in stack.ps()}
     assert rows["connect-init"].state == "exited" and rows["connect-init"].exit_code == 0
-    assert "no connectors to register" in stack.logs("connect-init")
-    assert connect.json("/connectors") == []
+    logs = stack.logs("connect-init")
+    assert "olist-postgres RUNNING" in logs and "connect-init: done" in logs
+    assert connect.json("/connectors") == ["olist-postgres"]
 
 
 def test_worker_uses_env_config_provider(connect, stack):

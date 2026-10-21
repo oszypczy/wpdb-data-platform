@@ -1,2 +1,3 @@
 - [Stage 0 verification](project_stage0_verification.md) — 2026-10-20 PASS baseline timings, port 9001 quirk, weak assertions to tighten, FRESH=1 budget-test gap
 - [Stage 1 verification](project_stage1_verification.md) — 2026-10-20 PASS: suite timings with a writing simulator, unverified sim claims, sampling/psql pitfalls
+- [Stage 2 verification](project_stage2_verification.md) — 2026-10-21 PASS 82+1s in 9 min; tests I tightened, open weak assertions, MCP quirks

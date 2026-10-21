@@ -27,6 +27,11 @@ class ServiceState:
     @property
     def ok(self) -> bool:
         if self.state == "running":
+            # one-shot init containers (`*-init`) are done only when they exited 0;
+            # `docker compose up -d` re-runs them, and connect-init takes seconds since
+            # stage 2 (it waits for the connector to be RUNNING)
+            if self.service.endswith("-init"):
+                return False
             return self.health in ("healthy", "")
         if self.state == "exited":
             return self.exit_code == 0

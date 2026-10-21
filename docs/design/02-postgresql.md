@@ -45,17 +45,19 @@ CREATE PUBLICATION dbz_publication FOR TABLES IN SCHEMA shop;   -- PostgreSQL 15
 
 Publikację tworzy skrypt startowy, a Debezium tylko z niej korzysta (`publication.autocreate.mode=disabled`). Każda nowa tabela w `shop` automatycznie trafia do CDC. Zgadza się to z dynamicznym tworzeniem tabel i z demo ewolucji schematu (`ALTER TABLE ADD COLUMN`).
 
+**Wyjątki (etap 2):** do publikacji należy dodatkowo pojedyncza tabela `sim.heartbeat` (§5; sam schemat `sim` nie), a tabele `shop._*` (sondy testowe tworzone i usuwane w milisekundach) są w publikacji, ale konektor ich nie przechwytuje (`table.exclude.list`, [03-debezium.md](03-debezium.md) §13: tabela usunięta przed zapisem offsetu konektora zostawia zdarzenia bez klucza, które kompaktowany temat odrzuca).
+
 ## 4. Rozszerzenie: schematy i role z minimalnymi uprawnieniami
 
 | Schemat | Zawartość | W CDC |
 |---|---|---|
 | `shop` | tabele biznesowe (customers, orders, order_items, …) | tak |
-| `sim` | `sim_state` (zegar symulacji), widoki uzgadniania, tabela heartbeat | nie (heartbeat: patrz §5) |
+| `sim` | `sim_state` (zegar symulacji), widoki uzgadniania, tabela heartbeat | nie; wyjątek: tabela `sim.heartbeat` jest w publikacji, ale konektor ją odfiltrowuje (§5) |
 
 | Rola | Uprawnienia |
 |---|---|
 | `shop_app` (symulator) | DDL i DML w `shop`, zapis w `sim` |
-| `debezium` | `REPLICATION` + `SELECT` na `shop` |
+| `debezium` | `REPLICATION` + `SELECT` na `shop`; `USAGE` na `sim` i `SELECT, INSERT, UPDATE` tylko na `sim.heartbeat` (§5); `sim.sim_state` i widoki niewidoczne |
 | `reader` | tylko `SELECT` na `shop` i `sim`: odczyt uzgadniający w testach i podgląd dla agentów (MCP `postgres`, [09-agents.md](09-agents.md) §3) |
 | `postgres` | tylko skrypty startowe |
 
@@ -64,7 +66,8 @@ Publikację tworzy skrypt startowy, a Debezium tylko z niej korzysta (`publicati
 Slot zatrzymuje WAL, dopóki Debezium go nie odczyta. Jeśli Connect leży, a symulator pisze, WAL rośnie bez ograniczeń i może zapchać dysk Dockera.
 
 - **`max_slot_wal_keep_size=2GB`:** po przekroczeniu limitu slot zostaje unieważniony zamiast zapychać dysk. Debezium musi wtedy wykonać ponowny snapshot, co trzeba uwzględnić w konfiguracji `snapshot.mode`.
-- **Heartbeat:** Debezium cyklicznie wykonuje mały UPDATE na tabeli heartbeat (`heartbeat.action.query`), żeby slot przesuwał się także w okresach ciszy. Szczegóły, w tym czy tabela musi być w publikacji, zostaną ustalone przy Debezium.
+- **Heartbeat (rozstrzygnięte, etap 2):** Debezium co 10 s wykonuje upsert jednego wiersza `sim.heartbeat (id = 1, ts)` (`heartbeat.action.query`), żeby slot przesuwał się także w okresach ciszy. **Tabela musi być w publikacji** (dokumentacja Debezium 3.6, „WAL disk space consumption”): konektor dostaje zmianę, odfiltrowuje ją (`schema.include.list=shop`), a odfiltrowane zdarzenie wymusza zapis offsetu, co przesuwa `confirmed_flush_lsn`. Realizacja w `containers/postgres/initdb/20-heartbeat.sql`: tabela (właściciel `shop_app`, `CHECK (id = 1)`), `ALTER PUBLICATION dbz_publication ADD TABLE sim.heartbeat`, `GRANT USAGE ON SCHEMA sim TO debezium`, `GRANT SELECT, INSERT, UPDATE ON sim.heartbeat TO debezium`, `GRANT SELECT … TO reader` (tabelę tworzy `postgres`, więc domyślne uprawnienia `shop_app` jej nie obejmują). Testy: `test_postgres.py::test_heartbeat_table_grants_and_publication`, `test_debezium.py::test_heartbeat_advances_the_slot_while_shop_is_idle`.
+- **Unieważnienie slotu:** przy `snapshot.mode=initial` konektor nie robi sam ponownego snapshotu; procedura ręczna w [03-debezium.md](03-debezium.md) §13. Przy domyślnym oknie (≈ 40 MB WAL) limit 2 GB jest nieosiągalny.
 - **Monitoring opóźnienia** (kandydat na wskaźnik w dashboardzie):
   ```sql
   SELECT slot_name, active,
@@ -143,7 +146,7 @@ Testy: `test_postgres.py::test_truth_views_exact_on_known_data` wykonuje plik dw
 |---|---|---|
 | integracyjny | konfiguracja serwera | `wal_level=logical`, ustawiony `max_slot_wal_keep_size` |
 | integracyjny | nowa tabela w `shop` | automatycznie `REPLICA IDENTITY FULL` (event trigger) i obecna w `dbz_publication` |
-| integracyjny | uprawnienia roli `debezium` | odczyt i replikacja działają; INSERT/UPDATE/DDL w `shop` odrzucone |
+| integracyjny | uprawnienia roli `debezium` | odczyt i replikacja działają; INSERT/UPDATE/DDL w `shop` odrzucone; w `sim` tylko upsert `heartbeat` (`test_postgres.py::test_debezium_cannot_write`, `::test_sim_schema_privileges`, `::test_heartbeat_table_grants_and_publication`) |
 | integracyjny | skrypty startowe na pustym wolumenie, dwa razy | identyczny stan bazy |
 | integracyjny | DELETE z `order_items` po `order_id` | plan zapytania używa indeksu FK |
 | e2e | uzgadnianie | widoki `sim.v_truth_*` zgodne z tabelami silver w Delta po zakończeniu przebiegu |
@@ -163,4 +166,4 @@ Testy: `test_postgres.py::test_truth_views_exact_on_known_data` wykonuje plik dw
 
 - **Rozstrzygnięte (etap 1):** zgodność wersji. Przypięte `postgres:16.15` i `quay.io/debezium/connect:3.6.3.Final`; Debezium 3.6 wspiera PostgreSQL 14–18 ([debezium.io/releases/3.6](https://debezium.io/releases/3.6/), macierz w [08-operations.md](08-operations.md) §1). `CREATE PUBLICATION … FOR TABLES IN SCHEMA` istnieje od PG 15 i wymaga superużytkownika, dlatego publikację tworzy initdb (`02-publication.sql`), a `pg_publication_namespace` jest sprawdzana testem `test_postgres.py::test_publication_covers_schema_shop`.
 - **Rozstrzygnięte (etap 1):** uprawnienia Debezium przy `publication.autocreate.mode=disabled`. Według dokumentacji konektora 3.6 (sekcja „Setting up permissions” i opis `publication.autocreate.mode`) w trybie `disabled` konektor nie tworzy ani nie zmienia publikacji, a jedynie sprawdza, że istnieje (brak → wyjątek i stop). Rola potrzebuje więc tylko `LOGIN`, `REPLICATION` (slot + `pgoutput`), `CONNECT` do bazy, `USAGE` na schemacie `shop` i `SELECT` na tabelach (snapshot `initial`). `CREATE` na bazie i własność tabel są wymagane wyłącznie dla trybów `all_tables`/`filtered`/`no_tables`, których nie używamy. Dokładnie taki zestaw daje `00-roles.sh` i `01-schemas.sql` (`ALTER DEFAULT PRIVILEGES … GRANT SELECT` obejmuje tabele tworzone później przez `shop_app`); testy `test_debezium_cannot_write` i `test_sim_schema_privileges`. Pełne połączenie `pgoutput` potwierdzi etap 2.
-- Zachowanie Debezium po unieważnieniu slotu (`max_slot_wal_keep_size`) i dobór `snapshot.mode`: etap 2.
+- **Rozstrzygnięte (etap 2):** `snapshot.mode=initial`; pełne połączenie `pgoutput` z domyślnym `pg_hba.conf` obrazu działa (slot `debezium_slot` aktywny, `test_debezium.py::test_connector_registered_by_connect_init_and_running`); po unieważnieniu slotu konektor zatrzymuje się i wymaga procedury ręcznej ([03-debezium.md](03-debezium.md) §13), limit 2 GB chroni dysk, nie jest osiągany w domyślnym oknie.

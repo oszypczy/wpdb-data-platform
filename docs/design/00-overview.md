@@ -59,11 +59,12 @@ Po każdym etapie system działa i jest zweryfikowany.
 |---|---|---|---|
 | 0 | Szkielet platformy: `docker-compose.yml` z infrastrukturą (Postgres, Kafka KRaft, Schema Registry, Connect z konwerterem AVRO, MinIO), healthchecki, kontenery startowe, `.env.example`, harness `pytest`, `Makefile`, CI, macierz wersji ([08](08-operations.md)) | ✅ | ✅ |
 | 1 | Dane + Business System + PostgreSQL | ✅ | ✅ (2026-10-20; zweryfikowane przez `qa-engineer`: 40 testów jednostkowych, 49 integracyjnych) |
-| 2 | Debezium + Kafka + Schema Registry (+ consumer) | ✅ | ⏳ |
-| 3 | Spark: bronze → silver | ✅ | ⏳ |
-| 4 | MinIO/Delta + gold | ✅ | ⏳ |
-| 5 | Dashboard Streamlit | ✅ | ⏳ |
-| 6 | Automatyzacja, zestaw testów (jednostkowe, integracyjne, e2e z awariami), dokumentacja wdrożenia | ⏳ | ⏳ |
+| 2 | Debezium + Kafka + Schema Registry (+ consumer) | ✅ | ✅ (2026-10-21; zweryfikowane przez `qa-engineer`: 69 testów jednostkowych, 82 integracyjne; `containers/connect/connectors/olist-postgres.json`, `containers/consumer/`, `20-heartbeat.sql`; kontrakt dla Sparka w [03](03-debezium.md) §13) |
+| 3 | Spark + MinIO/Delta: bronze → silver → gold (dawne etapy 3 i 4 scalone 2026-10-21, jedna weryfikacja QA) | ✅ | ⏳ |
+| 4 | Dashboard Streamlit | ✅ | ⏳ |
+| 5 | Testy e2e z awariami i uzgadnianiem Postgres ↔ Delta na docelowej wersji platformy, dokumentacja wdrożenia | ⏳ | ⏳ |
+
+Decyzja 2026-10-21: testy e2e (wiersze „e2e” w sekcjach Testy, dziś ⏳) powstają dopiero na końcu, gdy cała platforma jest w wersji docelowej.
 
 ## Otwarte kwestie
 

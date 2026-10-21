@@ -9,7 +9,9 @@ while :; do
   # '|' as separator: a tab is IFS whitespace, so empty fields (no health) would collapse
   while IFS='|' read -r name state health exit_code; do
     case "$state" in
-      running) [[ "$health" == "healthy" || -z "$health" ]] || bad=1 ;;
+      running) # a one-shot *-init container is done only once it exited 0
+               if [[ "$name" == *-init ]]; then bad=1
+               else [[ "$health" == "healthy" || -z "$health" ]] || bad=1; fi ;;
       exited)  [[ "$exit_code" == "0" ]] || { echo "FAILED: $name exited $exit_code"; exit 1; } ;;
       *)       bad=1 ;;
     esac

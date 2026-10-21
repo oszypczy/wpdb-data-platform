@@ -1,0 +1,18 @@
+[project]
+name = "wpdb-consumer"
+version = "0.1.0"
+description = "WPDB validating AVRO consumer for the Debezium CDC topics (docs/design/04-kafka.md §6)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "confluent-kafka[avro]==2.16.0",
+    # transitive (authlib via confluent-kafka's Schema Registry client); pinned because
+    # cryptography >= 47 crashes with SIGILL on import inside the Docker Desktop
+    # aarch64 VM (linuxkit 6.10) while 46.0.x works (docs/design/08-operations.md §1)
+    "cryptography==46.0.7",
+]
+
+[project.scripts]
+consumer = "consumer.cli:main"
+
+[tool.uv]
+package = false

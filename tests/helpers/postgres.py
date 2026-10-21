@@ -228,6 +228,16 @@ FROM pg_publication_namespace pn
 JOIN pg_publication p ON p.oid = pn.pnpubid
 JOIN pg_namespace n ON n.oid = pn.pnnspid
 UNION ALL
+SELECT 'pubtable ' || p.pubname || ' ' || c.relnamespace::regnamespace || '.' || c.relname
+FROM pg_publication_rel pr
+JOIN pg_publication p ON p.oid = pr.prpubid
+JOIN pg_class c ON c.oid = pr.prrelid
+UNION ALL
+SELECT 'acl sim.' || c.relname || ' owner=' || pg_get_userbyid(c.relowner)
+       || ' acl=' || coalesce(c.relacl::text, '-')
+FROM pg_class c
+WHERE c.relnamespace = 'sim'::regnamespace AND c.relname = 'heartbeat'
+UNION ALL
 SELECT 'eventtrigger ' || e.evtname || ' event=' || e.evtevent || ' enabled=' || e.evtenabled::text
        || ' tags=' || coalesce(array_to_string(e.evttags, ','), '-')
        || ' fn=' || e.evtfoid::regproc || ' src=' || md5(p.prosrc)

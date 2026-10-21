@@ -11,6 +11,7 @@ owned by `platform-devops`.
 | `initdb/01-schemas.sql` | schemas `shop` and `sim` owned by `shop_app`; USAGE/SELECT grants and default privileges |
 | `initdb/02-publication.sql` | `CREATE PUBLICATION dbz_publication FOR TABLES IN SCHEMA shop` |
 | `initdb/10-event-trigger.sql` | event trigger `shop_replica_identity_full`: every table created in `shop` gets `REPLICA IDENTITY FULL` (02 §2) |
+| `initdb/20-heartbeat.sql` | `sim.heartbeat` (one row) for Debezium's `heartbeat.action.query`; added to `dbz_publication` (required by Debezium for the slot to advance while `shop` is idle); grants `USAGE` on `sim` + `SELECT/INSERT/UPDATE` on this table to `debezium`, `SELECT` to `reader` (02 §5, 03 §7) |
 | `sql/truth-views.sql` | reconciliation views `sim.v_truth_*` (02 §8); **not** initdb: applied by the simulator as `shop_app` after it creates the tables, `CREATE OR REPLACE` only, re-runnable |
 
 The scripts in `initdb/` run only when the data volume is empty
@@ -20,7 +21,7 @@ The scripts in `initdb/` run only when the data volume is empty
 Numbering reserved for the `database-cdc` owner:
 
 - `1x-*`: event trigger (done, `10-event-trigger.sql`)
-- `2x-*`: heartbeat table for Debezium (02 §5, 03 §7; stage 2)
+- `2x-*`: heartbeat table for Debezium (done, `20-heartbeat.sql`)
 - `3x-*`: free. The truth views were moved out of initdb (`sql/truth-views.sql`)
   because they reference tables that do not exist at initdb time.
 
@@ -60,7 +61,11 @@ Numbering reserved for the `database-cdc` owner:
   `enable_seqscan=off` must use an index whose first column is `order_id`).
   Both pass since stage 1 (the simulator creates the tables and the indexes).
 - Keep `sim.sim_state` (and everything else that must not reach Kafka) in `sim`,
-  never in `shop`.
+  never in `shop`. Tables in `shop` whose name starts with `_` are published but not
+  captured by the connector (test probes, 03 §13); do not use that prefix for real tables.
+- Never `DROP` a captured table before the connector committed its offset past the
+  table's last change (03 §13): Debezium resolves the PK from the catalog when it decodes
+  the event, and a keyless event is rejected by the compacted topic.
 
 ## Test fixtures
 
