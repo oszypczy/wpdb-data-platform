@@ -85,7 +85,7 @@ def test_every_long_running_service_has_healthcheck_and_restart_policy():
     doc = yaml.safe_load(COMPOSE.read_text())
     init = {"kafka-init", "connect-init", "minio-init"}
     tools = {"consumer"}  # profile tools: run on demand, one-shot, no healthcheck
-    placeholders = {"spark", "dashboard"}  # healthchecks arrive with their stages
+    placeholders = {"dashboard"}  # healthcheck arrives with stage 4
     for name, svc in doc["services"].items():
         if name in tools:
             assert svc.get("profiles") == ["tools"], f"{name}: must live in profile tools"
@@ -121,6 +121,7 @@ DOCKERFILES = [
     CONTAINERS / "consumer" / "Dockerfile",
     CONTAINERS / "minio" / "Dockerfile",
     CONTAINERS / "simulator" / "Dockerfile",
+    CONTAINERS / "spark" / "Dockerfile",
 ]
 
 
@@ -206,3 +207,43 @@ def test_connector_json_is_pure_json_with_env_secret_and_topic_groups():
     assert cfg["producer.override.acks"] == "all"
     assert cfg["producer.override.enable.idempotence"] == "true"
     assert cfg["producer.override.compression.type"] == "zstd"
+
+
+def test_spark_service_runs_by_default_after_the_connector_and_minio_init():
+    """05 §1, 06 §8, 08 §2: `spark` is a default service (no profile) with a real
+    healthcheck; it starts after Kafka and the registry are healthy, the buckets exist
+    (minio-init) and the connector is registered (connect-init); it has no Postgres
+    settings (Spark never connects to Postgres)."""
+    svc = yaml.safe_load(COMPOSE.read_text())["services"]["spark"]
+    assert "profiles" not in svc
+    assert svc["healthcheck"]["test"] == ["CMD", "python3", "/app/healthcheck.py"]
+    assert svc["depends_on"] == {
+        "kafka": {"condition": "service_healthy"},
+        "schema-registry": {"condition": "service_healthy"},
+        "minio-init": {"condition": "service_completed_successfully"},
+        "connect-init": {"condition": "service_completed_successfully"},
+    }
+    env = svc["environment"]
+    assert not [k for k in env if k.startswith(("PG", "POSTGRES", "SHOP_APP", "DEBEZIUM"))]
+    assert env["MINIO_SPARK_ACCESS_KEY"].startswith("${MINIO_SPARK_ACCESS_KEY")
+
+
+def test_spark_image_pins_every_connector_jar_with_a_checksum():
+    """08 §1: the JARs of the Spark image are the pinned versions of the version matrix,
+    downloaded at build time and verified against their Maven .sha1."""
+    text = (CONTAINERS / "spark" / "Dockerfile").read_text()
+    for jar in (
+        "spark-sql-kafka-0-10_2.12-3.5.9.jar",
+        "spark-token-provider-kafka-0-10_2.12-3.5.9.jar",
+        "kafka-clients-3.4.1.jar",
+        "commons-pool2-2.11.1.jar",
+        "spark-avro_2.12-3.5.9.jar",
+        "delta-spark_2.12-3.3.3.jar",
+        "delta-storage-3.3.3.jar",
+        "hadoop-aws-3.3.4.jar",
+        "aws-java-sdk-bundle-1.12.262.jar",
+    ):
+        assert jar in text, jar
+    assert "sha1sum -c" in text
+    assert "--packages" not in (CONTAINERS / "spark" / "run.sh").read_text()
+    assert "ARG SPARK_IMAGE=apache/spark:3.5.9-scala2.12-java17-python3-ubuntu" in text

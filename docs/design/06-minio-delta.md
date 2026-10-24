@@ -14,12 +14,16 @@ Podział odpowiedzialności: [05-spark.md](05-spark.md) opisuje, *co* jest liczo
 ## 2. Rozszerzenie: kubełek na warstwę
 
 ```
-bronze/        orders/  order_items/  ...
-silver/        orders/  order_items/  ...            (CDF włączony)
-gold/          fact_order_items/  fact_orders_lifecycle/  dim_customer/  agg_revenue_hourly/ ...
-ops/           stream_metrics/  quarantine/
-checkpoints/   kafka_to_bronze/  bronze_to_silver/  silver_to_gold/
+bronze/        orders/  order_items/  ...  (jedna tabela na temat, także dla tabel dodanych w trakcie)
+silver/        orders/  order_items/  ...  (CDF włączony)
+gold/          dim_date/ dim_geography/ dim_customer/ dim_product/ dim_seller/
+               fact_order_items/ fact_orders_lifecycle/ revenue_events/ status_transitions/
+               agg_revenue_hourly/ agg_status_funnel/
+ops/           stream_metrics/ e2e_latency/ cdc_heartbeat/ quarantine/ maintenance_log/
+checkpoints/   kafka_to_bronze/ silver_<tabela>/ silver_to_gold/ gold_transitions/
+               gold_agg_revenue/ gold_agg_funnel/
 ```
+Etap 3: jedno zapytanie silver na tabelę (`silver_<tabela>`), bo zapytanie strumieniowe ma stały zbiór źródeł, a tabele mogą dochodzić w trakcie ([05-spark.md](05-spark.md) §12). Pełny katalog kolumn: §9.
 
 Osobne kubełki zamiast prefiksów w jednym pozwalają na **uprawnienia per warstwa** (ta sama zasada co role w Postgresie):
 
@@ -68,6 +72,7 @@ RESTORE TABLE gold.dim_customer TO VERSION AS OF 95;
   ```sql
   ALTER TABLE gold.fact_order_items ADD CONSTRAINT price_nonneg CHECK (price >= 0);
   ```
+  Etap 3 (zakładane przy tworzeniu tabel przez `delta_io.ensure_table`): `fact_order_items`: `price_nonneg` (`price >= 0`), `freight_nonneg` (`freight_value >= 0`); `fact_orders_lifecycle`: `items_nonneg`; `dim_customer`: `valid_range` (`valid_from < valid_to`); `agg_revenue_hourly`: `corrections_nonpos` (`corrections <= 0`). Silver przyjmuje nowe kolumny jawnie (`MERGE … withSchemaEvolution()`), gold i ops nie (schemat zamrożony w `lakehouse/tables.py`).
 
 ## 7. Rozszerzenie: utrzymanie tabel
 
@@ -79,29 +84,94 @@ Trigger co 10 s tworzy dużo drobnych plików.
 - **Antywzorzec:** reguły cyklu życia MinIO (automatyczne usuwanie obiektów) na tabelach Delta uszkodziłyby tabelę. Pliki Delta usuwa wyłącznie VACUUM.
 - **Partycjonowanie świadomie minimalne:** przy setkach MB partycje tworzą głównie małe pliki (Delta rekomenduje je dopiero od około 1 GB). Zamiast tego Z-ORDER lub liquid clustering. Wyjątek: bronze partycjonowany po dacie ingestii.
 
+**Implementacja i pomiar (etap 3).** `containers/spark/lakehouse/maintenance.py`, uruchamiane przez pętlę sterownika co `MAINTENANCE_INTERVAL_S` (1800 s) albo na żądanie (`docker compose exec spark touch /tmp/spark/run-maintenance`), w osobnym wątku obok strumieni (konflikty commitów są ponawiane po obu stronach). Gold i ops: OPTIMIZE (fakty z Z-ORDER `customer_state, purchase_date` / `customer_state, purchased_at`); bronze i silver: `delta.autoOptimize.autoCompact` przy zapisie; wszystkie warstwy: VACUUM z retencją 720 h (bronze) / 168 h (pozostałe, `RETENTION_HOURS` w `lakehouse/tables.py`). Każda operacja to wiersz w `ops/maintenance_log` (pliki i bajty przed/po, czas typowego zapytania przed/po dla faktów).
+
+Pomiar na stosie (okno domyślne, ok. 1,5 h strumienia, 2026-10-23):
+
+| Tabela | Operacja | Pliki przed → po | Bajty przed → po | Zapytanie przed → po |
+|---|---|---|---|---|
+| `ops/cdc_heartbeat` (dopisywanie co 10 s) | OPTIMIZE | 445 → 1 | 856 510 → 19 986 (43×) | – |
+| `ops/stream_metrics` | OPTIMIZE | 3 → 1 | 119 987 → 110 367 | – |
+| `gold/fact_order_items` (6 tys. wierszy, MERGE co 20 s) | OPTIMIZE ZORDER BY (customer_state, purchase_date) | 1 → 1 | 923 868 → 923 868 | 155 → 123 ms (`sum(price)` dla SP) |
+| `gold/fact_orders_lifecycle` | OPTIMIZE ZORDER BY (customer_state, purchased_at) | 1 → 1 | 963 335 → 963 335 | 122 → 111 ms |
+| test `test_optimize_compacts_files_and_keeps_the_data` | OPTIMIZE ZORDER | 8 → 1 | suma kontrolna bez zmian | – |
+| bronze/silver (autoCompact) | VACUUM 720 h / 168 h | 1 → 1 na tabelę | bez zmian (pliki usunięte przez autoCompact są młodsze niż retencja) | – |
+
+Wniosek: przy tej skali tabele gold mieszczą się w jednym pliku, bo każdy MERGE przepisuje dotknięty (jedyny) plik, więc OPTIMIZE i Z-ORDER nie mają czego łączyć ani porządkować (pomiar zapytania mieści się w szumie); realny problem małych plików mają tabele tylko dopisywane (heartbeat, metryki: setki plików po kilka kB na godzinę), a bronze/silver rozwiązuje autoCompact. Cały przebieg utrzymania (30 tabel, 60 operacji) trwa ok. 50 s.
+
+**Pułapki znalezione przy implementacji:**
+- **`spark.hadoop.delta.enableFastS3AListFrom=true` niszczy tabele przy VACUUM** (Delta 3.3.3 + S3A + MinIO): VACUUM usunął pliki `_delta_log/*.json` tabeli (odtworzone na tabeli testowej: po VACUUM zostały tylko `_commits/` i `_last_vacuum_info`, odczyt kończył się `DELTA_NO_COMMITS_FOUND`). Ustawienie przyspiesza listowanie dziennika, ale jest zakazane (`tests/unit/test_spark_session.py::test_fast_s3a_list_from_stays_off`).
+- **VACUUM listuje pliki w 10 000 zadaniach** (`spark.sql.sources.parallelPartitionDiscovery.parallelism`), co obok strumieni dało przebieg utrzymania > 15 min; ustawione 8.
+- **`RETAIN` jest zaokrąglany do pełnych godzin**, więc krótkie retencje w testach to 0 h albo 1 h (test VACUUM pokazuje obie strony).
+
 ## 8. Rozszerzenie: checkpointy w MinIO
 
 Checkpointy wszystkich zapytań strumieniowych są w kubełku `checkpoints`. Cały stan przetwarzania (dane i pozycje strumieni) jest w MinIO, więc **kontener Sparka jest bezstanowy**: po usunięciu i ponownym utworzeniu wznawia pracę od miejsca, w którym skończył. Koszt to wolniejsze checkpointy niż na dysku lokalnym. MinIO ma silną spójność, a poprawność sprawdza test e2e.
 
-## 9. Rozszerzenie: odczyt danych bez Sparka
+Etap 3: `checkpoints/<zapytanie>/` (`kafka_to_bronze`, `silver_<tabela>`, `silver_to_gold`, `gold_transitions`, `gold_agg_revenue`, `gold_agg_funnel`) plus dwa pliki projektu: `_wpdb_txn_app_id` (token `txnAppId` danego checkpointu, [05-spark.md](05-spark.md) §12) i `_wpdb_gold_versions/<paczka>.json` (wersje silver przypięte do paczki gold, ostatnie 20). Stan agregacji okienkowych (state store) też jest w checkpoincie. Koszt S3A: ok. 0,3 s na mikropaczkę poza samym przetwarzaniem (zapis `offsets/` i `commits/`), zmierzone w `ops/stream_metrics`. Restart kontenera wznawia z checkpointów bez duplikatów w bronze (`tests/integration/test_spark.py::test_restart_from_checkpoint_keeps_bronze_offsets_unique`); usunięcie i odtworzenie kontenera z uzgadnianiem: e2e w etapie 5.
 
-**DuckDB z hosta:**
+## 9. Odczyt danych (wymagana dokumentacja) i odczyt bez Sparka
+
+Wszystkie tabele są w formacie Delta w MinIO: `s3://<warstwa>/<tabela>` (Spark: `s3a://…`). Endpoint z hosta: `http://127.0.0.1:9000` (path-style, bez TLS, region `us-east-1`), z kontenera: `http://minio:9000`. Klucze kont są w `.env` (`MINIO_*`): do przeglądania wszystkiego służy konto tylko do odczytu `agent`, do warstw publicznych `dashboard` (tylko `gold` i `ops`); `spark` (zapis) zostaje w kontenerze Sparka.
+
+**Katalog tabel (etap 3).** Schematy gold i ops są kontraktem dla dashboardu: `containers/spark/lakehouse/tables.py` (nazwy, kolumny, właściwości, CHECK), opis w [05-spark.md](05-spark.md) §12.
+
+| Kubełek / tabela | Co zawiera | Klucz | Uwagi |
+|---|---|---|---|
+| `bronze/<tabela>` (8 tabel `shop` + tabele dodane w trakcie) | każde zdarzenie Debezium: `op`, `before`, `after` (struktury), `source_lsn`, `source_tx_id`, `source_ts`, `source_snapshot`, `transaction_id`, `dbz_ts`, `key`, `kafka_topic/partition/offset/timestamp`, `key_schema_id`, `value_schema_id`, `ingested_at`, `ingest_date` | unikalne `(kafka_topic, kafka_partition, kafka_offset)` | tylko dopisywanie (`delta.appendOnly`), partycje `ingest_date`, `wpdb.primaryKey` = PK ze schematu klucza |
+| `silver/<tabela>` | aktualny stan tabeli źródłowej: kolumny Postgresa + `_lsn`, `_op`, `_is_deleted`, `_source_ts`, `_tx_id`, `_kafka_partition`, `_kafka_offset`, `_ingested_at`, `_updated_at` | PK z `wpdb.primaryKey` | CDF włączony; odbiorcy filtrują `NOT _is_deleted` |
+| `gold/dim_date`, `dim_geography`, `dim_product`, `dim_seller` | wymiary (kalendarz 2016–2019, 27 stanów, produkty z kategorią EN, sprzedawcy) | `date_key` / `state` / `product_id` / `seller_id` | |
+| `gold/dim_customer` | SCD2 po `customer_unique_id`: `customer_sk`, adres, `version`, `valid_from`, `valid_to` (9999-12-31 = bieżąca), `is_current` | `customer_sk` | CHECK `valid_from < valid_to` |
+| `gold/fact_order_items` | ziarno: pozycja zamówienia; `price`, `freight_value`, status, stan klienta i sprzedawcy, `customer_sk`, `purchased_at`, `purchase_date(_key)` | `(order_id, order_item_id)` | CHECK `price >= 0`, `freight_value >= 0`; Z-ORDER `customer_state, purchase_date` |
+| `gold/fact_orders_lifecycle` | akumulujący snapshot: kamienie milowe, `h_to_approve`, `d_to_ship`, `d_to_deliver`, `is_delivered`, `is_late`, pozycje, płatności | `order_id` | CHECK `items >= 0` |
+| `gold/revenue_events` | ruchy przychodu: `sale` (+), `correction` (− po anulacji), `adjustment` | `event_id` | tylko dopisywanie |
+| `gold/status_transitions` | przejścia statusów z par `before → after` | `(order_id, source_lsn)` | |
+| `gold/agg_revenue_hourly` | okna 1 h czasu symulacji × stan: `revenue`, `sales`, `corrections`, `freight`, `items_sold`, `items_canceled` | `(window_start, customer_state)` | watermark; CHECK `corrections <= 0` |
+| `gold/agg_status_funnel` | okna 1 h × `from_status` → `to_status`: `transitions` (`(new)` = utworzenie) | `(window_start, from_status, to_status)` | watermark |
+| `ops/stream_metrics` | postęp mikropaczek każdego zapytania | – | tylko dopisywanie |
+| `ops/e2e_latency` | opóźnienie zapis − commit w Postgresie (silver, gold) | – | tylko dopisywanie |
+| `ops/cdc_heartbeat` | heartbeat Debezium co 10 s | – | tylko dopisywanie |
+| `ops/quarantine` | wiersze łamiące reguły jakości (`rule`, `severity`, `record_key`, `payload`) | `(rule, source_table, record_key)` | |
+| `ops/maintenance_log` | przebiegi OPTIMIZE/VACUUM z pomiarem przed/po | – | tylko dopisywanie |
+
+**DuckDB (CLI, Python albo serwer MCP `duckdb` agentów):**
 ```sql
-INSTALL delta; LOAD delta;
-CREATE SECRET (TYPE s3, KEY_ID 'dashboard', SECRET '…', ENDPOINT 'localhost:9000', URL_STYLE 'path', USE_SSL false);
+INSTALL delta; LOAD delta; INSTALL httpfs; LOAD httpfs;
+SET TimeZone = 'UTC';   -- znaczniki czasu Delta to UTC; bez tego DuckDB pokaże strefę hosta
+CREATE SECRET minio (TYPE s3, KEY_ID 'dashboard', SECRET '<MINIO_DASHBOARD_SECRET_KEY>',
+                     ENDPOINT '127.0.0.1:9000', URL_STYLE 'path', USE_SSL false, REGION 'us-east-1');
 SELECT customer_state, sum(price) FROM delta_scan('s3://gold/fact_order_items') GROUP BY 1 ORDER BY 2 DESC LIMIT 5;
+SELECT order_status, count(*) FROM delta_scan('s3://gold/fact_orders_lifecycle') GROUP BY 1;
+-- silver/bronze wymagają konta agent (dashboard nie ma do nich dostępu)
+SELECT count(*) FROM delta_scan('s3://silver/orders') WHERE NOT _is_deleted;
+SELECT op, before.order_status, after.order_status FROM delta_scan('s3://bronze/orders') LIMIT 5;
 ```
 
-**Python `deltalake` (delta-rs), z time travel:**
+**Python `deltalake` (delta-rs), wersje, historia, time travel, CDF:**
 ```python
-DeltaTable("s3://gold/fact_order_items", version=120, storage_options={...}).to_pandas()
+from deltalake import DeltaTable
+opts = {"AWS_ACCESS_KEY_ID": "dashboard", "AWS_SECRET_ACCESS_KEY": "…",
+        "AWS_ENDPOINT_URL": "http://127.0.0.1:9000", "AWS_ALLOW_HTTP": "true", "AWS_REGION": "us-east-1"}
+dt = DeltaTable("s3://gold/fact_order_items", storage_options=opts)
+dt.version(); dt.history(5); dt.schema(); dt.metadata().configuration   # CHECK, właściwości
+df = dt.to_pandas()                                                      # albo dt.to_pyarrow_table()
+old = DeltaTable("s3://gold/fact_order_items", version=120, storage_options=opts).to_pandas()
+cdf = DeltaTable("s3://silver/orders", storage_options=agent_opts).load_cdf(starting_version=10)
 ```
 
-**Konsola MinIO** (`http://127.0.0.1:9091`, w sieci compose `minio:9001`): przeglądanie kubełków i plików. Od wydań z maja 2025 konsola community to tylko przeglądarka obiektów (zarządzanie kontami i politykami wyłącznie przez `mc`, co robi `minio-init`). Port hosta to 9091, bo 9001 zajmuje inny kontener na maszynie autora; API i konsola są publikowane tylko na `127.0.0.1` (patrz „Dystrybucja MinIO”).
+**Spark (w kontenerze `spark`, np. `docker compose exec spark /opt/spark/bin/pyspark` z konfiguracją z `containers/spark/lakehouse/session.py`):**
+```python
+spark.read.format("delta").load("s3a://gold/fact_order_items")
+spark.read.format("delta").option("versionAsOf", 120).load("s3a://gold/fact_order_items")
+spark.read.format("delta").option("readChangeFeed", "true").option("startingVersion", 10).load("s3a://silver/orders")
+spark.sql("DESCRIBE HISTORY delta.`s3a://gold/fact_order_items`").show()
+```
 
-Dashboard również czyta przez delta-rs lub DuckDB, bez Sparka.
+**Konsola MinIO** (`http://127.0.0.1:9091`, w sieci compose `minio:9001`): przeglądanie kubełków i plików (`_delta_log/*.json` to commity, `part-*.parquet` dane). Od wydań z maja 2025 konsola community to tylko przeglądarka obiektów (zarządzanie kontami i politykami wyłącznie przez `mc`, co robi `minio-init`). Port hosta to 9091, bo 9001 zajmuje inny kontener na maszynie autora; API i konsola są publikowane tylko na `127.0.0.1` (patrz „Dystrybucja MinIO”).
 
-**Zgodność protokołu:** niektóre funkcje Delta (np. deletion vectors, liquid clustering) podnoszą wersję protokołu tabeli, której starsi czytelnicy nie odczytają. W gold i ops włączamy tylko funkcje obsługiwane przez delta-rs i DuckDB. Sprawdza to test.
+Dashboard również czyta przez delta-rs lub DuckDB, bez Sparka. Znaczniki czasu biznesowe to czas symulacji (oryginalne wartości Olist bez strefy), zapisane jako `timestamp` UTC; należy je czytać w UTC.
+
+**Zgodność protokołu:** niektóre funkcje Delta (np. deletion vectors, liquid clustering, column mapping, `timestampNtz`) podnoszą wersję protokołu czytelnika, której starsi czytelnicy nie odczytają. W gold i ops włączamy tylko funkcje obsługiwane przez delta-rs i DuckDB: CHECK (cecha zapisującego), `appendOnly`; `minReaderVersion = 1`, `delta.enableDeletionVectors = false`, brak column mapping, brak CDF. Sprawdza to test `tests/integration/test_delta.py::test_every_gold_and_ops_table_is_readable_by_delta_rs_and_duckdb` (wszystkie tabele gold/ops, delta-rs na koncie `dashboard` i DuckDB).
 
 ## 10. Rozszerzenie: sekrety
 
@@ -111,21 +181,25 @@ Dashboard również czyta przez delta-rs lub DuckDB, bez Sparka.
 
 ## 11. Testy
 
-| Poziom | Test | Oczekiwany wynik |
-|---|---|---|
-| integracyjny | `minio-init` uruchomiony dwa razy | kubełki, polityki i konta istnieją; brak błędów |
-| integracyjny | uprawnienia konta `dashboard` | odczyt `gold` działa; zapis do `gold` i odczyt `bronze` odrzucone |
-| integracyjny | uprawnienia konta `agent` | odczyt każdego kubełka działa; zapis i usuwanie odrzucone |
-| integracyjny | zapis przez Sparka, odczyt przez delta-rs i DuckDB | identyczne wyniki |
-| integracyjny | time travel | `VERSION AS OF n` zwraca stan sprzed późniejszego MERGE |
-| integracyjny | `RESTORE` | tabela wraca do wskazanej wersji |
-| integracyjny | CDF po MERGE | zmiany z typami `update_preimage`/`update_postimage`/`delete` |
-| integracyjny | zapis łamiący `CHECK` | odrzucony |
-| integracyjny | niezgodny typ kolumny / nowa kolumna z `mergeSchema` | odrzucony / przyjęta |
-| integracyjny | OPTIMIZE | mniej plików, dane identyczne (suma kontrolna) |
-| integracyjny | VACUUM | usuwa tylko pliki starsze niż retencja; time travel w oknie retencji działa |
-| e2e | usunięcie i ponowne utworzenie kontenera Sparka | wznowienie z checkpointów w MinIO, brak duplikatów, uzgadnianie zgodne |
-| e2e (awaria) | restart MinIO w trakcie strumienia | Spark ponawia zapis; uzgadnianie zgodne |
+Status: ✅ przechodzi, ⏳ e2e: odłożone do etapu 5. Scenariusze niszczące działają na tabelach jednorazowych `s3a://gold/_it_<hex>/…` zapisywanych przez Sparka na hoście (te same wersje Delta i S3A co obraz, konto `spark`), odczyt przez delta-rs i DuckDB; prefiks jest usuwany po teście.
+
+| Poziom | Test | Oczekiwany wynik | Identyfikator | Status |
+|---|---|---|---|---|
+| integracyjny | `minio-init` uruchomiony dwa razy | kubełki, polityki i konta istnieją; brak błędów | `tests/integration/test_stack.py::test_init_container_idempotent[minio-init]` | ✅ |
+| integracyjny | uprawnienia konta `dashboard` | odczyt `gold` działa; zapis do `gold` i odczyt `bronze` odrzucone | `tests/integration/test_minio.py::test_dashboard_account_restricted` | ✅ |
+| integracyjny | uprawnienia konta `agent` | odczyt każdego kubełka działa; zapis i usuwanie odrzucone | `test_minio.py::test_agent_account_read_only_everywhere` | ✅ |
+| integracyjny | zapis przez Sparka, odczyt przez delta-rs i DuckDB | identyczne wyniki | `tests/integration/test_delta.py::test_spark_write_reads_identically_in_delta_rs_and_duckdb`, `::test_every_gold_and_ops_table_is_readable_by_delta_rs_and_duckdb` (żywe tabele gold/ops: kolumny kontraktu, `minReaderVersion = 1`, bez DV i column mapping) | ✅ |
+| integracyjny | time travel | `VERSION AS OF n` zwraca stan sprzed późniejszego MERGE | `test_delta.py::test_time_travel_returns_the_state_before_a_later_merge` (Spark i delta-rs) | ✅ |
+| integracyjny | `RESTORE` | tabela wraca do wskazanej wersji | `test_delta.py::test_restore_returns_the_table_to_a_version` | ✅ |
+| integracyjny | CDF po MERGE | zmiany z typami `update_preimage`/`update_postimage`/`delete` | `test_delta.py::test_change_data_feed_after_merge_has_pre_post_images_and_deletes` (CDF przez delta-rs) | ✅ |
+| integracyjny | zapis łamiący `CHECK` | odrzucony | `test_delta.py::test_write_breaking_a_check_constraint_is_rejected` (i ograniczenia obecne w żywym `gold/fact_order_items`) | ✅ |
+| integracyjny | niezgodny typ kolumny / nowa kolumna z `mergeSchema` | odrzucony / przyjęta | `test_delta.py::test_type_mismatch_is_rejected_and_a_new_column_needs_merge_schema` | ✅ |
+| integracyjny | OPTIMIZE | mniej plików, dane identyczne (suma kontrolna) | `test_delta.py::test_optimize_compacts_files_and_keeps_the_data` (8 plików → 1, Z-ORDER jak w zadaniu utrzymania) | ✅ |
+| integracyjny | VACUUM | usuwa tylko pliki starsze niż retencja; time travel w oknie retencji działa | `test_delta.py::test_vacuum_removes_only_files_older_than_the_retention` | ✅ |
+| integracyjny (`slow`) | zadanie utrzymania w kontenerze | OPTIMIZE + Z-ORDER gold, VACUUM wszystkich warstw, pomiar przed/po w `ops/maintenance_log` | `test_delta.py::test_maintenance_job_runs_in_the_container_and_logs_before_after` | ✅ |
+| jednostkowy | konfiguracja sesji nie włącza `enableFastS3AListFrom` (§7) | brak ustawienia | `tests/unit/test_spark_session.py::test_fast_s3a_list_from_stays_off` | ✅ |
+| e2e | usunięcie i ponowne utworzenie kontenera Sparka | wznowienie z checkpointów w MinIO, brak duplikatów, uzgadnianie zgodne | etap 5 (`tests/e2e/`); restart z checkpointu na poziomie integracyjnym: [05-spark.md](05-spark.md) §10 | ⏳ e2e |
+| e2e (awaria) | restart MinIO w trakcie strumienia | Spark ponawia zapis; uzgadnianie zgodne | etap 5 | ⏳ e2e |
 
 ## 12. Dystrybucja MinIO: build ze źródeł (decyzja z etapu 0)
 
@@ -151,7 +225,7 @@ Stan na 2026-10-20: MinIO zarchiwizowało repozytoria `minio/minio` i `minio/mc`
 
 ## Do weryfikacji przy implementacji
 
-- ~~Dostępność obrazów MinIO community.~~ **Rozstrzygnięte (etap 0, 2026-10-20):** obrazy community zniknęły, więc budujemy MinIO ze źródeł (sekcja „Dystrybucja MinIO” poniżej, [08-operations.md](08-operations.md) §13). Test: `tests/integration/test_minio.py::test_server_version_matches_pinned_tag`.
-- Liquid clustering w wybranej wersji Delta OSS.
-- Funkcje Delta obsługiwane przez delta-rs i DuckDB (wersje protokołu).
-- Wydajność i poprawność checkpointów na S3A.
+- ~~Dostępność obrazów MinIO community.~~ **Rozstrzygnięte (etap 0, 2026-10-20):** obrazy community zniknęły, więc budujemy MinIO ze źródeł (sekcja „Dystrybucja MinIO” powyżej, [08-operations.md](08-operations.md) §13). Test: `tests/integration/test_minio.py::test_server_version_matches_pinned_tag`.
+- **Rozstrzygnięte (etap 3): liquid clustering w Delta OSS 3.3.** Dostępny (`CLUSTER BY`, cecha zapisującego `clustering` + `domainMetadata`, protokół zapisującego 7), ale nieużywany: tabele mieszczą się w jednym pliku (§7), a Z-ORDER nie zmienia protokołu. Decyzja: Z-ORDER na faktach.
+- **Rozstrzygnięte (etap 3): funkcje Delta czytelne dla delta-rs 1.6.6 i DuckDB 1.5.6.** Gold i ops mają `minReaderVersion = 1` i tylko cechy zapisującego (CHECK, `appendOnly`, `invariants` nie są używane), bez DV, column mapping, CDF, `timestampNtz`; silver ma dodatkowo CDF (czytany przez delta-rs `load_cdf`, DuckDB czyta silver zwykłym `delta_scan`). Test: `tests/integration/test_delta.py::test_every_gold_and_ops_table_is_readable_by_delta_rs_and_duckdb`; znaczniki czasu Delta są w DuckDB typu `TIMESTAMP WITH TIME ZONE` (UTC), stąd `SET TimeZone='UTC'` w §9.
+- **Rozstrzygnięte (etap 3): wydajność i poprawność checkpointów na S3A.** Poprawne (restart z checkpointu, test w §11), koszt ok. 0,3 s na paczkę (§8); pliki dziennika i checkpointów są małe, MinIO ma silną spójność (zapis przez `rename` S3A = kopiowanie + usunięcie).

@@ -1,0 +1,241 @@
+"""05 §10 integration rows: Spark on the live stack (Kafka + Schema Registry + MinIO).
+
+The tests write their own probe rows through Postgres (as `shop_app`, like the
+simulator) and read the result back from Delta without Spark (DuckDB with the read-only
+`agent` account, delta-rs), so they check the running `spark` container end to end.
+"""
+
+from __future__ import annotations
+
+import json
+from decimal import Decimal
+
+import pytest
+
+from tests.helpers import cdc
+from tests.helpers.clients import pg_connect
+from tests.helpers.lake import Lake
+from tests.helpers.wait import wait_until
+
+pytestmark = pytest.mark.integration
+
+TABLES = (
+    "customers",
+    "orders",
+    "order_items",
+    "order_payments",
+    "order_reviews",
+    "products",
+    "sellers",
+    "product_category_name_translation",
+)
+PK_PROPERTY = "wpdb.primaryKey"
+TIMEOUT = 240  # trigger 10 s, a few chained micro-batches, plus slack for a busy laptop
+
+
+@pytest.fixture(scope="module")
+def lake(stack, settings) -> Lake:
+    return Lake(settings, "agent")
+
+
+@pytest.fixture
+def app(stack, settings):
+    conn = pg_connect("shop_app", settings["SHOP_APP_PASSWORD"])
+    conn.autocommit = True
+    yield conn
+    conn.close()
+
+
+def _silver_row(lake: Lake, table: str, where: str, params: list) -> dict | None:
+    rel = lake.con.execute(f"SELECT * FROM delta_scan('s3://silver/{table}') WHERE {where}", params)
+    cols = [d[0] for d in rel.description]
+    row = rel.fetchone()
+    return dict(zip(cols, row, strict=True)) if row else None
+
+
+def test_real_debezium_messages_reach_bronze_and_silver_with_types(lake, app, pg_reader):
+    """05 §10: "prawdziwe wiadomości Debezium" → bronze i silver zapisane; kolumny i typy
+    poprawne (`decimal`, `timestamp`). A purchase written like the simulator's (one
+    transaction over 4 tables) goes through, then an UPDATE and the DELETE."""
+    clock = cdc.sim_state(pg_reader)["sim_clock"]
+    order = cdc.probe_purchase(app, "stage3", "created", clock)
+    try:
+        item = wait_until(
+            lambda: _silver_row(lake, "order_items", "order_id = ?", [order.order_id]),
+            TIMEOUT,
+            every=2,
+            desc="probe item in silver",
+        )
+        pg = pg_reader.execute(
+            "SELECT price, freight_value, shipping_limit_date FROM shop.order_items "
+            "WHERE order_id = %s",
+            (order.order_id,),
+        ).fetchone()
+        assert (item["price"], item["freight_value"]) == (Decimal("58.90"), Decimal("13.29"))
+        assert (item["price"], item["freight_value"]) == (pg[0], pg[1])
+        # timestamp-millis of a naive Postgres TIMESTAMP: same wall-clock value, UTC
+        assert item["shipping_limit_date"].replace(tzinfo=None) == pg[2]
+        assert item["_is_deleted"] is False and item["_op"] == "c" and item["_lsn"] > 0
+
+        schema = {f.name: f.type for f in lake.table("s3://silver/order_items").schema().fields}
+        assert str(schema["price"]) == 'PrimitiveType("decimal(10,2)")'
+        assert str(schema["shipping_limit_date"]) == 'PrimitiveType("timestamp")'
+        assert str(schema["order_item_id"]) == 'PrimitiveType("integer")'
+
+        # every table of the transaction is in bronze with the full envelope
+        for t in ("customers", "orders", "order_items", "order_payments"):
+            key = "customer_id" if t == "customers" else "order_id"
+            val = order.customer_id if t == "customers" else order.order_id
+            rows = lake.sql(
+                f"SELECT op, before IS NULL, after.{key}, source_lsn, transaction_id, "
+                f"value_schema_id, kafka_offset FROM delta_scan('s3://bronze/{t}') "
+                f"WHERE after.{key} = ?",
+                [val],
+            )
+            assert len(rows) == 1, (t, rows)
+            op, no_before, _, lsn, tx, sid, _ = rows[0]
+            assert (op, no_before) == ("c", True) and lsn > 0 and tx and sid > 0
+
+        # UPDATE then DELETE: silver follows, the delete is soft (05 §4)
+        approved = clock
+        cdc.probe_set_status(app, order, "approved", order_approved_at=approved)
+        wait_until(
+            lambda: (
+                (_silver_row(lake, "orders", "order_id = ?", [order.order_id]) or {}).get(
+                    "order_status"
+                )
+                == "approved"
+            ),
+            TIMEOUT,
+            every=2,
+            desc="approved in silver",
+        )
+    finally:
+        cdc.probe_delete(app, order)
+    gone = wait_until(
+        lambda: (
+            (
+                r := _silver_row(
+                    lake, "order_items", "order_id = ? AND _is_deleted", [order.order_id]
+                )
+            )
+            and r
+        ),
+        TIMEOUT,
+        every=2,
+        desc="soft delete in silver",
+    )
+    assert gone["_op"] == "d" and gone["price"] == Decimal("58.90")  # the before image
+    bronze_ops = lake.sql(
+        "SELECT op FROM delta_scan('s3://bronze/orders') WHERE coalesce(after.order_id, "
+        "before.order_id) = ? ORDER BY source_lsn",
+        [order.order_id],
+    )
+    assert [r[0] for r in bronze_ops] == ["c", "u", "d"]
+
+
+def test_primary_keys_come_from_the_key_schema(lake, pg_reader, schema_registry):
+    """05 §10: "PK ze schematu klucza" → PK zgodne z tabelami (the table added at runtime
+    is covered by test_add_column_reaches_silver_without_restart)."""
+    for t in TABLES:
+        topic = f"olist.shop.{t}"
+        key = json.loads(schema_registry.json(f"/subjects/{topic}-key/versions/latest")["schema"])
+        from_registry = [f["name"] for f in key["fields"]]
+        assert from_registry == cdc.primary_key(pg_reader, t), t
+        assert lake.properties(f"s3://silver/{t}")[PK_PROPERTY] == ",".join(from_registry), t
+        assert lake.properties(f"s3://bronze/{t}")[PK_PROPERTY] == ",".join(from_registry), t
+
+
+def test_spark_never_connects_to_postgres(stack, pg_reader):
+    """05 §4, CLAUDE.md: Spark has no Postgres credentials, no JDBC driver, and no session
+    from its container shows up in pg_stat_activity."""
+    env = json.loads(stack.docker("inspect", "spark").stdout)[0]["Config"]["Env"]
+    assert not [e for e in env if e.startswith(("PG", "POSTGRES", "SHOP_APP", "DEBEZIUM"))]
+    jars = stack.exec("spark", "ls", "/opt/spark/jars").stdout
+    assert "postgresql" not in jars.lower()
+    nets = json.loads(stack.docker("inspect", "spark").stdout)[0]["NetworkSettings"]["Networks"]
+    ip = next(iter(nets.values()))["IPAddress"]
+
+    def sessions_from_spark() -> int:
+        return pg_reader.execute(
+            "SELECT count(*) FROM pg_stat_activity WHERE client_addr = %s::inet", (ip,)
+        ).fetchone()[0]
+
+    assert [sessions_from_spark() for _ in range(5)] == [0] * 5
+
+
+def test_add_column_reaches_silver_without_restart(lake, app, stack, topic_reader, settings):
+    """05 §10: "ADD COLUMN w trakcie działania" → nowa kolumna w silver bez restartu, and
+    "PK ze schematu klucza" for a table added at runtime: a new captured table gets its
+    bronze/silver tables and its PK from `<topic>-key`; then `ALTER TABLE ADD COLUMN`
+    reaches silver while the container keeps running (same start time, no restart)."""
+    from tests.helpers.clients import CONNECT_URL, SCHEMA_REGISTRY_URL, Http, kafka_admin
+
+    before = json.loads(stack.docker("inspect", "spark").stdout)[0]["State"]
+    admin = kafka_admin()
+    probe = cdc.CapturedProbe.create(app, topic_reader, admin)
+    try:
+        uri = f"s3://silver/{probe.table}"
+        row1 = wait_until(
+            lambda: lake.exists(uri) and _silver_row(lake, probe.table, "id = 1", []),
+            TIMEOUT,
+            every=3,
+            desc="runtime table in silver",
+        )
+        assert row1["v"] == "1"
+        assert lake.properties(uri)[PK_PROPERTY] == "id"
+        assert lake.properties(f"s3://bronze/{probe.table}")[PK_PROPERTY] == "id"
+
+        start = topic_reader.watermarks(probe.topic)
+        app.execute(f"ALTER TABLE shop.{probe.table} ADD COLUMN w text")
+        app.execute(f"INSERT INTO shop.{probe.table} VALUES (2, 'b', 'new')")
+        rec = topic_reader.read_new(start, lambda rs: any(r.value for r in rs), timeout=60)
+        for r in rec:
+            if r.value:
+                probe.note(r)
+        row2 = wait_until(
+            lambda: _silver_row(lake, probe.table, "id = 2", []),
+            TIMEOUT,
+            every=3,
+            desc="evolved row in silver",
+        )
+        assert row2["w"] == "new"
+        assert _silver_row(lake, probe.table, "id = 1", [])["w"] is None
+        after = json.loads(stack.docker("inspect", "spark").stdout)[0]["State"]
+        assert after["StartedAt"] == before["StartedAt"] and after["Status"] == "running"
+    finally:
+        probe.teardown(app, Http(CONNECT_URL), Http(SCHEMA_REGISTRY_URL), admin, topic_reader)
+    assert settings  # the module-level fixtures stay alive for the teardown
+
+
+@pytest.mark.slow
+def test_restart_from_checkpoint_keeps_bronze_offsets_unique(lake, app, stack, pg_reader):
+    """05 §10: "restart z checkpointu" → w bronze unikalne `(topic, partition, offset)`.
+    The container is restarted while the simulator keeps writing; a probe written after
+    the restart arrives exactly once; no Kafka record is in bronze twice."""
+    stack.run("restart", "spark")
+    stack.wait_healthy(timeout=300)
+    clock = cdc.sim_state(pg_reader)["sim_clock"]
+    order = cdc.probe_purchase(app, "restart", "created", clock)
+    try:
+        wait_until(
+            lambda: (
+                lake.scalar(
+                    "SELECT count(*) FROM delta_scan('s3://bronze/orders') "
+                    "WHERE after.order_id = ?",
+                    [order.order_id],
+                )
+                == 1
+            ),
+            TIMEOUT,
+            every=3,
+            desc="probe in bronze after restart",
+        )
+    finally:
+        cdc.probe_delete(app, order)
+    for t in TABLES:
+        total, distinct = lake.sql(
+            "SELECT count(*), count(DISTINCT (kafka_topic, kafka_partition, kafka_offset)) "
+            f"FROM delta_scan('s3://bronze/{t}')"
+        )[0]
+        assert total == distinct, (t, total, distinct)

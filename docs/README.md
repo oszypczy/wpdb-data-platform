@@ -20,10 +20,10 @@ Numeracja odpowiada kolejności w przepływie danych.
 | [02-postgresql.md](design/02-postgresql.md) | PostgreSQL | ✅ (zaimplementowany, etapy 1–2: `containers/postgres/`: event trigger `REPLICA IDENTITY FULL`, widoki prawdy `sim.v_truth_*`, polityka indeksów FK, tabela heartbeat `dbz.heartbeat` w publikacji) |
 | [03-debezium.md](design/03-debezium.md) | Debezium (Kafka Connect) | ✅ (zaimplementowany, etap 2: `containers/connect/connectors/olist-postgres.json`: snapshot + strumień, pełna koperta, klucz = PK, typy logiczne, heartbeat, metadane transakcji, `topic.creation`; kontrakt dla Sparka w §13) |
 | [04-kafka.md](design/04-kafka.md) | Kafka + Schema Registry | ✅ (zaimplementowany, etap 2: tematy jako kod, BACKWARD, pomiar AVRO vs JSON i zstd, consumer walidujący `containers/consumer/`) |
-| [05-spark.md](design/05-spark.md) | Spark Structured Streaming | ✅ |
-| [06-minio-delta.md](design/06-minio-delta.md) | MinIO + Delta Lake | ✅ |
+| [05-spark.md](design/05-spark.md) | Spark Structured Streaming | ✅ (zaimplementowany, etap 3: `containers/spark/`: dekodowanie per `schema_id`, bronze exactly-once, silver MERGE ze strażnikiem LSN i miękkim usuwaniem, gold: gwiazda, SCD2, akumulujący snapshot, okna z watermarkiem, lejek i korekty, kwarantanna, metryki i opóźnienie; ustalenia w §12; e2e w etapie 5) |
+| [06-minio-delta.md](design/06-minio-delta.md) | MinIO + Delta Lake | ✅ (zaimplementowany, etap 3: kubełek na warstwę, CDF na silver, CHECK, time travel/RESTORE, OPTIMIZE/Z-ORDER/VACUUM z pomiarem, checkpointy w MinIO, **odczyt danych: §9**) |
 | [07-dashboard.md](design/07-dashboard.md) | Dashboard Streamlit | ✅ |
-| [08-operations.md](design/08-operations.md) | Automatyzacja, niezawodność, strategia i zestaw testów (macierz wersji, start, awarie, reset, testy, CI) | ✅ (etapy 0–2; sekcje e2e uzupełnia etap 6) |
+| [08-operations.md](design/08-operations.md) | Automatyzacja, niezawodność, strategia i zestaw testów (macierz wersji, start, awarie, reset, testy, CI) | ✅ (etapy 0–3; sekcje e2e uzupełnia etap 5) |
 | [09-agents.md](design/09-agents.md) | Zespół agentów budujących system: role, skille, MCP, orkiestracja | ✅ |
 
 ## Materiały źródłowe (`requirements/`)

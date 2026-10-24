@@ -1,0 +1,4 @@
+# The Spark image runs Python 3.10 (apache/spark:3.5.9-...-python3-ubuntu = Ubuntu 22.04),
+# so the lakehouse package must stay 3.10-compatible; everything else follows the root.
+extend = "../../pyproject.toml"
+target-version = "py310"

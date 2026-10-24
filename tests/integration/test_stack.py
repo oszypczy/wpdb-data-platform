@@ -24,6 +24,7 @@ DEFAULT_SERVICES = {
     "minio",
     "minio-init",
     "simulator",  # stage 1: runs by default, healthy once its preload is done
+    "spark",  # stage 3: runs by default, healthy once its Kafka -> bronze query is active
 }
 INIT_SERVICES = ("kafka-init", "minio-init", "connect-init")
 HEALTHY_BUDGET_S = 180

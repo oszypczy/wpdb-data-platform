@@ -14,7 +14,7 @@ argument-hint: "[up|down|reset|logs <service>|wait]"
 | `schema-registry` | `schema-registry` | 8081 | 127.0.0.1:8081 | `GET :8081/subjects` (python3 `urllib`; the image has no curl) |
 | `connect` | `connect` | 8083 | 127.0.0.1:8083 | `curl -f :8083/connectors` |
 | `minio` | `minio` | 9000 (API), 9001 (console) | 127.0.0.1:9000 / 127.0.0.1:9091 (console) | `curl -f :9000/minio/health/live` |
-| `spark` | `spark` | 4040 (UI) | 127.0.0.1:4040 | driver log / metrics table |
+| `spark` | `spark` | 4040 (UI) | 127.0.0.1:4040 | `python3 /app/healthcheck.py`: supervisor health file < 60 s old and every started query active; runs by default since stage 3 |
 | `dashboard` | `dashboard` | 8501 | 127.0.0.1:8501 | `curl -f :8501/_stcore/health` |
 | `simulator` | `simulator` | - | - | `python /app/healthcheck.py`: heartbeat file fresh and phase `replay`/`done` (healthy = preload finished); runs by default, needs `data/olist` |
 | init (one-shot) | `kafka-init`, `connect-init`, `minio-init` | - | - | exit code 0 |

@@ -275,7 +275,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512m
+          # stage 3: 493 MiB measured under the Spark load with 512m (08 §7)
+          memory: 1g
     networks: [wpdb]
 
   minio-init:
@@ -347,20 +348,30 @@ services:
           memory: 512m
     networks: [wpdb]
 
-  # ------------------------------------------------- pipeline (profile, stages 3-5)
+  # ------------------------------------------- Spark Structured Streaming (stage 3)
+  # Kafka (Debezium AVRO) -> bronze -> silver -> gold in Delta on MinIO (05, 06). One
+  # container, local[*]; all state (tables and checkpoints) lives in MinIO, so the
+  # container is stateless. Never connects to Postgres: PKs come from the key schemas.
   spark:
     build:
       context: ./containers/spark
     image: wpdb/spark
     container_name: spark
     restart: unless-stopped
-    profiles: [pipeline]
     environment:
       KAFKA_BOOTSTRAP: kafka:29092
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
       S3_ENDPOINT: http://minio:9000
       MINIO_SPARK_ACCESS_KEY: ${MINIO_SPARK_ACCESS_KEY:?set it in .env}
       MINIO_SPARK_SECRET_KEY: ${MINIO_SPARK_SECRET_KEY:?set it in .env}
+      # driver heap (local mode: driver = executor); RAM budget in 08 §7
+      SPARK_DRIVER_MEMORY: 1536m
+      SPARK_TRIGGER: 10 seconds
+      SPARK_GOLD_TRIGGER: 20 seconds
+      SPARK_SHUFFLE_PARTITIONS: 4
+      # watermark of the windowed aggregates in simulated time (05 §5)
+      AGG_WATERMARK: 24 hours
+      MAINTENANCE_INTERVAL_S: 1800
     ports:
       - "127.0.0.1:4040:4040"
     depends_on:
@@ -370,12 +381,22 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+      # the connector is registered and its snapshot running: the first micro-batch
+      # already sees every table topic and both key/value subjects
+      connect-init:
+        condition: service_completed_successfully
+    healthcheck:
+      <<: *hc
+      # supervisor health file fresh (< 60 s) and every started query active
+      test: ["CMD", "python3", "/app/healthcheck.py"]
+      start_period: 120s
     deploy:
       resources:
         limits:
           memory: 3g
     networks: [wpdb]
 
+  # ------------------------------------------------- pipeline (profile, stage 4)
   dashboard:
     build:
       context: ./containers/dashboard
