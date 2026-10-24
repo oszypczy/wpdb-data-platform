@@ -396,23 +396,31 @@ services:
           memory: 3g
     networks: [wpdb]
 
-  # ------------------------------------------------- pipeline (profile, stage 4)
+  # ------------------------------------------------------ Streamlit dashboard (stage 4)
+  # Reads only the gold and ops Delta tables in MinIO (delta-rs + DuckDB, read-only
+  # account `dashboard`); never Spark, Kafka or Postgres (07). Starts as soon as the
+  # buckets and accounts exist and is healthy with an empty gold ("czekam na dane").
   dashboard:
     build:
       context: ./containers/dashboard
     image: wpdb/dashboard
     container_name: dashboard
     restart: unless-stopped
-    profiles: [pipeline]
     environment:
       S3_ENDPOINT: http://minio:9000
       MINIO_DASHBOARD_ACCESS_KEY: ${MINIO_DASHBOARD_ACCESS_KEY:?set it in .env}
       MINIO_DASHBOARD_SECRET_KEY: ${MINIO_DASHBOARD_SECRET_KEY:?set it in .env}
+      DASHBOARD_REFRESH_S: 10
     ports:
       - "127.0.0.1:8501:8501"
     depends_on:
       minio-init:
         condition: service_completed_successfully
+    healthcheck:
+      <<: *hc
+      # python:slim has no curl; healthcheck.py = GET :8501/_stcore/health
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      start_period: 30s
     deploy:
       resources:
         limits:

@@ -1,0 +1,14 @@
+# Streamlit server settings for the container (07 §1). The theme is left to the
+# viewer (light/dark follow the browser); charts are styled for both.
+[server]
+headless = true
+port = 8501
+address = "0.0.0.0"
+runOnSave = false
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"

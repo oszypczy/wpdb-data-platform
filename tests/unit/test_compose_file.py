@@ -85,7 +85,7 @@ def test_every_long_running_service_has_healthcheck_and_restart_policy():
     doc = yaml.safe_load(COMPOSE.read_text())
     init = {"kafka-init", "connect-init", "minio-init"}
     tools = {"consumer"}  # profile tools: run on demand, one-shot, no healthcheck
-    placeholders = {"dashboard"}  # healthcheck arrives with stage 4
+    placeholders: set[str] = set()  # stage 4: the dashboard has its healthcheck too
     for name, svc in doc["services"].items():
         if name in tools:
             assert svc.get("profiles") == ["tools"], f"{name}: must live in profile tools"
@@ -119,6 +119,7 @@ CONTAINERS = ROOT / "containers"
 DOCKERFILES = [
     CONTAINERS / "connect" / "Dockerfile",
     CONTAINERS / "consumer" / "Dockerfile",
+    CONTAINERS / "dashboard" / "Dockerfile",
     CONTAINERS / "minio" / "Dockerfile",
     CONTAINERS / "simulator" / "Dockerfile",
     CONTAINERS / "spark" / "Dockerfile",
@@ -247,3 +248,44 @@ def test_spark_image_pins_every_connector_jar_with_a_checksum():
     assert "sha1sum -c" in text
     assert "--packages" not in (CONTAINERS / "spark" / "run.sh").read_text()
     assert "ARG SPARK_IMAGE=apache/spark:3.5.9-scala2.12-java17-python3-ubuntu" in text
+
+
+def test_dashboard_service_runs_by_default_after_minio_init_only():
+    """07 §1, §7, 08 §2/§3: `dashboard` is a default service (no profile) on
+    127.0.0.1:8501 with the Streamlit health endpoint as healthcheck; it waits only for
+    the buckets and accounts (minio-init), not for Spark (healthy with an empty gold), and
+    gets only the read-only `dashboard` keys: no Postgres, Kafka or Spark settings."""
+    svc = yaml.safe_load(COMPOSE.read_text())["services"]["dashboard"]
+    assert "profiles" not in svc
+    assert svc["ports"] == ["127.0.0.1:8501:8501"]
+    assert svc["healthcheck"]["test"] == ["CMD", "python", "/app/healthcheck.py"]
+    assert "/_stcore/health" in (CONTAINERS / "dashboard" / "healthcheck.py").read_text()
+    assert svc["depends_on"] == {"minio-init": {"condition": "service_completed_successfully"}}
+    env = svc["environment"]
+    assert set(env) == {
+        "S3_ENDPOINT",
+        "MINIO_DASHBOARD_ACCESS_KEY",
+        "MINIO_DASHBOARD_SECRET_KEY",
+        "DASHBOARD_REFRESH_S",
+    }
+    assert env["S3_ENDPOINT"] == "http://minio:9000"
+    assert svc["deploy"]["resources"]["limits"]["memory"]
+
+
+def test_dashboard_image_pins_its_dependencies_and_vendors_the_geojson():
+    """08 §1, 07 §4: locked dependencies (uv sync --frozen) with the matrix versions; the
+    Brazil GeoJSON is in the image (no download at start) with 27 states."""
+    import json
+
+    d = CONTAINERS / "dashboard"
+    text = (d / "Dockerfile").read_text()
+    assert "uv sync --frozen --no-dev" in text and "COPY assets ./assets" in text
+    deps = (d / "pyproject.toml").read_text()
+    for pin in ("streamlit==1.66.1", "deltalake==1.6.6", "duckdb==1.5.6", "plotly==7.1.0"):
+        assert pin in deps, pin
+        assert pin in (ROOT / "pyproject.toml").read_text(), f"root pyproject: {pin}"
+    assert (d / "uv.lock").exists()
+    geo = json.loads((d / "assets" / "brazil-states.geojson").read_text())
+    assert len(geo["features"]) == 27
+    assert {f["id"] for f in geo["features"]} >= {"SP", "RJ", "MG", "DF", "AC"}
+    assert "public domain" in (d / "assets" / "README.md").read_text()

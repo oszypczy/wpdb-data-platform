@@ -24,6 +24,12 @@ dev = [
     "duckdb==1.5.6",
     "pyarrow==25.0.1",
     "pytz==2026.5",  # DuckDB returns TIMESTAMP WITH TIME ZONE as tz-aware datetimes
+    # stage 4: the dashboard's query layer and streamlit.testing.AppTest run on the host
+    # with the same pins as containers/dashboard/pyproject.toml (08 §1)
+    "streamlit==1.66.1",
+    "plotly==7.1.0",
+    "pandas==3.0.6",
+    "numpy==2.5.3",
 ]
 
 [tool.uv]
@@ -31,8 +37,8 @@ package = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# the simulator and consumer packages are importable in unit tests without installing them
-pythonpath = ["containers/simulator", "containers/consumer", "containers/spark"]
+# the component packages are importable in unit tests without installing them
+pythonpath = ["containers/simulator", "containers/consumer", "containers/spark", "containers/dashboard"]
 addopts = "--strict-markers -ra"
 timeout = 600
 markers = [
@@ -51,4 +57,4 @@ extend-exclude = ["data", "docs", ".claude"]
 select = ["E", "F", "I", "W", "B", "UP"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["consumer", "lakehouse", "simulator", "tests"]
+known-first-party = ["consumer", "dashboard", "lakehouse", "simulator", "tests"]

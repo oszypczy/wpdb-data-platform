@@ -61,7 +61,7 @@ Po każdym etapie system działa i jest zweryfikowany.
 | 1 | Dane + Business System + PostgreSQL | ✅ | ✅ (2026-10-20; zweryfikowane przez `qa-engineer`: 40 testów jednostkowych, 49 integracyjnych) |
 | 2 | Debezium + Kafka + Schema Registry (+ consumer) | ✅ | ✅ (2026-10-21; zweryfikowane przez `qa-engineer`: 69 testów jednostkowych, 82 integracyjne; `containers/connect/connectors/olist-postgres.json`, `containers/consumer/`, `20-heartbeat.sql`; kontrakt dla Sparka w [03](03-debezium.md) §13) |
 | 3 | Spark + MinIO/Delta: bronze → silver → gold (dawne etapy 3 i 4 scalone 2026-10-21, jedna weryfikacja QA) | ✅ | ✅ (2026-10-23, zbudowane przez `streaming-lakehouse`, weryfikacja `qa-engineer` razem z całością na końcu (decyzja 2026-10-24); `containers/spark/`, ustalenia w [05](05-spark.md) §12 i [06](06-minio-delta.md) §7–§9; e2e w etapie 5) |
-| 4 | Dashboard Streamlit | ✅ | ⏳ |
+| 4 | Dashboard Streamlit | ✅ | ✅ (2026-10-24, zbudowany przez `analytics-dashboard`, weryfikacja `qa-engineer` razem z etapami 3–5 na końcu; `containers/dashboard/`: 9 stron, warstwa zapytań delta-rs + DuckDB, odczyt tylko po zmianie wersji tabeli, mapa z GeoJSON Natural Earth; 41 testów jednostkowych (w tym 2 testy compose), 14 integracyjnych; e2e w etapie 5) |
 | 5 | Testy e2e z awariami i uzgadnianiem Postgres ↔ Delta na docelowej wersji platformy, jedna pełna weryfikacja `qa-engineer` etapów 3–5, dokumentacja wdrożenia | ⏳ | ⏳ |
 
 Decyzja 2026-10-21: testy e2e (wiersze „e2e” w sekcjach Testy, dziś ⏳) powstają dopiero na końcu, gdy cała platforma jest w wersji docelowej.
@@ -69,5 +69,5 @@ Decyzja 2026-10-21: testy e2e (wiersze „e2e” w sekcjach Testy, dziś ⏳) po
 ## Otwarte kwestie
 
 - Dashboard to dodatkowy kontener poza diagramem z `requirements/`. Trzeba potwierdzić z prowadzącym, że nie liczy się jako „nowy komponent”.
-- Plik geolocation (58 MB) jest poza repozytorium (`.gitignore`), bo mapa w dashboardzie korzysta z GeoJSON stanów. Wraca tylko, jeśli okaże się potrzebny.
+- Plik geolocation (58 MB) jest poza repozytorium (`.gitignore`), bo mapa w dashboardzie korzysta z GeoJSON stanów (etap 4: Natural Earth, domena publiczna, [07-dashboard.md](07-dashboard.md) §4). Wraca tylko, jeśli okaże się potrzebny.
 - **Rozstrzygnięte (etap 1):** domyślne `SIM_SPEED=1440`, `MAX_EVENTS_PER_SEC=20`, okno 2017-01-05 → 2017-03-31; zestaw na prezentację (Black Friday) w [01-business-system.md](01-business-system.md) §4 i `.env.example`.

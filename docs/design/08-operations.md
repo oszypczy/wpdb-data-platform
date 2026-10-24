@@ -2,7 +2,7 @@
 
 Ten dokument opisuje, jak cały system wstaje jednym `docker compose up`, jak się zachowuje przy awariach, jak go resetować i jak uruchamiać testy. Właściciel: `platform-devops` (razem z `qa-engineer` dla sekcji o testach). Kontrakt nazw usług i portów jest w skillu `stack-ops` (`.claude/skills/stack-ops/SKILL.md`); ten dokument i skill zmieniają się razem.
 
-Stan: **etap 0 ukończony 2026-10-20** (infrastruktura: Postgres, Kafka, Schema Registry, Connect, MinIO, kontenery startowe, harness testów, CI); **etap 1 (symulator + PostgreSQL) zaimplementowany 2026-10-20**, usługa `simulator` startuje domyślnie; **etap 2 (Debezium + Kafka + Schema Registry + consumer) zaimplementowany 2026-10-20**: konektor `olist-postgres` rejestrowany po preloadzie, tematy `olist.*` z `topic.creation`, usługa `consumer` w profilu `tools`. **Etap 3 (Spark + MinIO/Delta) zaimplementowany 2026-10-23**: usługa `spark` startuje domyślnie po `connect-init` i `minio-init`. Sekcje dotyczące dalszego potoku (Spark, dashboard, testy e2e z awariami) są uzupełniane w kolejnych etapach.
+Stan: **etap 0 ukończony 2026-10-20** (infrastruktura: Postgres, Kafka, Schema Registry, Connect, MinIO, kontenery startowe, harness testów, CI); **etap 1 (symulator + PostgreSQL) zaimplementowany 2026-10-20**, usługa `simulator` startuje domyślnie; **etap 2 (Debezium + Kafka + Schema Registry + consumer) zaimplementowany 2026-10-20**: konektor `olist-postgres` rejestrowany po preloadzie, tematy `olist.*` z `topic.creation`, usługa `consumer` w profilu `tools`. **Etap 3 (Spark + MinIO/Delta) zaimplementowany 2026-10-23**: usługa `spark` startuje domyślnie po `connect-init` i `minio-init`. **Etap 4 (dashboard Streamlit) zaimplementowany 2026-10-24**: usługa `dashboard` startuje domyślnie po `minio-init` (bez zależności od Sparka). Sekcje dotyczące dalszego potoku (Spark, dashboard, testy e2e z awariami) są uzupełniane w kolejnych etapach.
 
 ## 1. Macierz wersji
 
@@ -32,6 +32,7 @@ Procedura: skill `version-matrix`. Kotwica linii Kafki to Debezium: `connect:3.6
 | S3A | `hadoop-aws` `3.3.4` + `aws-java-sdk-bundle` `1.12.262` | | = Hadoop w obrazie (`hadoop-client-api-3.3.4.jar`); bundle z `hadoop-project` 3.3.4 (`aws-java-sdk.version`) | [hadoop-project 3.3.4 POM](https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-project/3.3.4/hadoop-project-3.3.4.pom); wszystkie JAR-y pobierane w buildzie z kontrolą `.sha1` (test `test_compose_file.py::test_spark_image_pins_every_connector_jar_with_a_checksum`) |
 | Spark w testach na hoście | `pyspark==3.5.9`, `delta-spark==3.3.3` (root `pyproject.toml`), JAR-y przez Ivy: `io.delta:delta-spark_2.12:3.3.3`, `org.apache.spark:spark-avro_2.12:3.5.9`, `org.apache.hadoop:hadoop-aws:3.3.4`; JDK 17 (`tests/helpers/spark.py` wybiera 17 przez `java_home -v 17` / `JAVA_HOME_17_*`) | | Spark 3.5 nie działa na Javie 23 hosta | `tests/unit/conftest.py` |
 | Czytelnicy Delta (testy, etap 4) | `deltalake` `1.6.6`, `duckdb` `1.5.6` (+ rozszerzenia `delta`, `httpfs`), `pyarrow` `25.0.1`, `pytz` `2026.5` (DuckDB zwraca `TIMESTAMPTZ`) | | bez identity columns, column mapping, deletion vectors i `timestampNtz` w tabelach czytanych bez Sparka; CDF czytany przez delta-rs (`load_cdf`) | test `test_delta.py::test_every_gold_and_ops_table_is_readable_by_delta_rs_and_duckdb`; [06-minio-delta.md](06-minio-delta.md) §12 |
+| Dashboard (etap 4) | `wpdb/dashboard` z `python:3.12.15-slim-bookworm` + `uv` `0.9.18`; `streamlit` `1.66.1`, `plotly` `7.1.0`, `deltalake` `1.6.6`, `duckdb` `1.5.6`, `pyarrow` `25.0.1`, `pandas` `3.0.6`, `numpy` `2.5.3` (te same przypięcia w root `pyproject.toml` dla testów AppTest) | | Streamlit 1.66 wymaga Pythona ≥ 3.11 i `pyarrow` ≠ 25.0.0, `<27`; `st.fragment(run_every)` od 1.37, `st.navigation` od 1.36; delta-rs czyta gold/ops (protokół czytelnika 1); znaczniki czasu INT96 ze Sparka czytane z `coerce_int96_timestamp_unit="us"`; obraz bez `pytz`, więc czasy z DuckDB rzutowane na `TIMESTAMP` ([07-dashboard.md](07-dashboard.md) §5) | [PyPI streamlit 1.66.1](https://pypi.org/project/streamlit/1.66.1/) (`requires_dist`); `containers/dashboard/pyproject.toml`, `uv.lock`; testy `tests/integration/test_dashboard.py` |
 
 Plan awaryjny, gdyby linia CP 8.3 sprawiła kłopoty: Debezium `3.2.0.Final` (Kafka 4.0) + CP `8.0.8`.
 
@@ -47,7 +48,7 @@ postgres ───────────────────────�
 kafka ──► kafka-init ──► schema-registry ──────────────┼──► connect ──► connect-init
 minio ──► minio-init                                   │
                               (profil tools, na żądanie)   kafka + schema-registry ──► consumer
-                              (domyślnie od etapu 3)        (profil pipeline, etap 4)
+                              (domyślnie od etapu 3)        (domyślnie od etapu 4)
 kafka + schema-registry + minio-init + connect-init ──► spark        minio-init ──► dashboard
 ```
 
@@ -61,6 +62,7 @@ kafka + schema-registry + minio-init + connect-init ──► spark        minio
 | 5 | `connect-init` | `connect` **i `simulator`** healthy (etap 2: snapshot dopiero po preloadzie, 03 §2) | exit 0 po `PUT /connectors/olist-postgres/config` i `RUNNING` konektora oraz zadania (timeout 120 s) |
 | 2 | `simulator` | `postgres` healthy; `data/olist/*.csv` na hoście (`make up` wywołuje `make data`) | `healthcheck.py`: plik heartbeat < 30 s **i** faza `replay`/`done` (po preloadzie; `start_period` 120 s) |
 | – | `consumer` (profil `tools`) | `kafka`, `schema-registry` healthy | nie startuje z `make up`; `docker compose run --rm consumer …` (04 §6) |
+| 3 | `dashboard` (etap 4, domyślnie) | `minio-init` exit 0 (kubełki i konto `dashboard`); **nie** czeka na Sparka | `healthcheck.py` (§3): Streamlit odpowiada na `/_stcore/health`, także gdy gold jest pusty (strony pokazują „czekam na dane”); zdrowy ok. 10 s po starcie kontenera |
 | 6 | `spark` (etap 3, domyślnie) | `kafka`, `schema-registry` healthy; `minio-init` i `connect-init` exit 0 | `healthcheck.py` (§3): zdrowy ok. 30 s po starcie kontenera (`kafka_to_bronze` aktywne); kolejne zapytania (silver per tabela, gold) dochodzą w ciągu ok. 1 min |
 
 **Zmierzony czas do „all services healthy”** (Apple Silicon, 8 CPU, 9.7 GB RAM dla Dockera, obrazy już zbudowane i pobrane): patrz §2.1. Budżet w teście `test_stack.py::test_fresh_stack_healthy_within_budget`: ≤ 180 s od `down -v`.
@@ -95,7 +97,7 @@ Tabela jest kopią kontraktu ze skillu `stack-ops`; wszystkie healthchecki mają
 | `minio` | `minio:9000` (API), `minio:9001` (konsola) | `127.0.0.1:9000`, `127.0.0.1:9091` | `curl -sf :9000/minio/health/live` |
 | `simulator` | – | – | `python /app/healthcheck.py`: heartbeat `/tmp/simulator/heartbeat` < 30 s i faza `replay`/`done` (01 §5); `start_period` 120 s |
 | `spark` (etap 3) | – | `127.0.0.1:4040` (Spark UI) | `python3 /app/healthcheck.py`: plik `/tmp/spark/health.json` pisany przez pętlę sterownika ma < 60 s i status `ok` (zapytanie `kafka_to_bronze` i każde już uruchomione zapytanie aktywne); `start_period` 120 s |
-| `dashboard` (etap 5) | – | `127.0.0.1:8501` | `curl -f :8501/_stcore/health` |
+| `dashboard` (etap 4) | – | `127.0.0.1:8501` | `python /app/healthcheck.py`: `GET :8501/_stcore/health` przez `urllib` (obraz `python:slim` nie ma `curl`; wyjątek przy HTTP ≥ 400 = kod 1); niezależny od danych; `start_period` 30 s |
 | `kafka-init`, `minio-init`, `connect-init` | – | – | kod wyjścia 0 |
 
 Skrypt `.claude/skills/stack-ops/scripts/wait-healthy.sh [timeout]` blokuje, aż każda usługa jest `healthy` i każdy kontener startowy wyszedł z kodem 0; `tests/helpers/compose.py::ComposeStack.wait_healthy` to jego port w Pythonie. **Poprawka etapu 2:** działający kontener `*-init` (bez healthchecku) nie jest już traktowany jak gotowy: `docker compose up -d` uruchamia kontenery startowe ponownie, a `connect-init` od etapu 2 trwa kilka sekund (czeka na `RUNNING`), więc testy startowały, zanim skończył (`test_connect.py::test_connect_init_registered_the_connector` widział stan `running`).
@@ -157,8 +159,8 @@ Limity z `docker-compose.yml` (Docker Desktop ma 9.7 GB) i zużycie zmierzone `d
 | `simulator` | 512 MB | 240 MB | |
 | `spark` | **3 GB** | 2.5–2.6 GB w trakcie strumienia, 1.7 GB bezczynnie | `SPARK_DRIVER_MEMORY=1536m` (tryb lokalny: sterownik = wykonawca), metaspace do 384 MB, pamięć bezpośrednia do 256 MB, proces Pythona `foreachBatch` ok. 40 MB; przy limicie 2.5 GB zużycie dochodziło do 2.47 GB, stąd 3 GB; CPU: skoki 400–630 % w czasie mikropaczek, 1–3 % między nimi |
 | kontenery startowe | 128–512 MB | krótkotrwałe | |
-| `dashboard` | 512 MB | – | etap 4 |
-| **pełny stos (limity)** | **≈ 9.5 GB** (bez kontenerów startowych) | **≈ 5.3–5.8 GB** zajęte w trakcie strumienia | limity to sufity, nie rezerwacje; zapas do 9.7 GB ok. 4 GB. Na maszynie autora działają też obce kontenery (`qdrant` 1–2 GB), które zjadają ten zapas |
+| `dashboard` | 512 MB | 77–80 MB bezczynnie, 276 MB przy jednej sesji przechodzącej przez 9 stron, 333 MB przy trzech równoległych sesjach (etap 4, 2026-10-24) | tabele gold/ops w Arrow raz na proces (wspólne dla sesji), wyniki zapytań w LRU (256 wpisów); zapas ok. 1,5× |
+| **pełny stos (limity)** | **≈ 9.5 GB** (bez kontenerów startowych; z dashboardem) | **≈ 5.3–5.8 GB** zajęte w trakcie strumienia (etap 3) + do 0.33 GB dashboard; zmierzone 2026-10-24 na stosie po przebiegu: ok. 5.5 GB łącznie | limity to sufity, nie rezerwacje; zapas do 9.7 GB ok. 4 GB. Na maszynie autora działają też obce kontenery (`qdrant` 1–2 GB), które zjadają ten zapas |
 
 ## 8. Zmienne środowiskowe
 
@@ -293,6 +295,11 @@ Status: ✅ przechodzi, ⏳ zaplanowany (etap). Wiersze etapu 0 z planu `qa-engi
 | 06 §9, §11, §12 | każda tabela gold/ops czytelna dla delta-rs (konto `dashboard`) i DuckDB, `minReaderVersion = 1`, bez DV i column mapping; zapis Sparka = odczyt delta-rs = odczyt DuckDB | integracyjny | `tests/integration/test_delta.py::test_every_gold_and_ops_table_is_readable_by_delta_rs_and_duckdb`, `::test_spark_write_reads_identically_in_delta_rs_and_duckdb` | ✅ |
 | 06 §4, §5, §6, §11 | time travel, RESTORE, CDF (pre/post/delete), CHECK odrzuca, niezgodny typ odrzucony / `mergeSchema` przyjęty | integracyjny | `test_delta.py::test_time_travel_returns_the_state_before_a_later_merge`, `::test_restore_returns_the_table_to_a_version`, `::test_change_data_feed_after_merge_has_pre_post_images_and_deletes`, `::test_write_breaking_a_check_constraint_is_rejected`, `::test_type_mismatch_is_rejected_and_a_new_column_needs_merge_schema` | ✅ |
 | 06 §7, §11 | OPTIMIZE (mniej plików, ta sama suma), VACUUM (retencja, time travel w oknie), zadanie utrzymania w kontenerze z pomiarem w `ops/maintenance_log` | integracyjny (+`slow`) | `test_delta.py::test_optimize_compacts_files_and_keeps_the_data`, `::test_vacuum_removes_only_files_older_than_the_retention`, `::test_maintenance_job_runs_in_the_container_and_logs_before_after` | ✅ |
+| 07 §7 | warstwa zapytań: KPI, korekta z anulacji, lejek, puste tabele, wersja N, pamięć podręczna (brak odczytu bez zmiany wersji); pozostałe zapytania stron; kontrakt kolumn = `lakehouse/tables.py`; każda strona na fiksturach i na pustym jeziorze („czekam na dane”); filtry poza fragmentem | unit | `tests/unit/test_dashboard_queries.py` (11), `test_dashboard_lake.py` (5), `test_dashboard_contract.py` (3), `test_dashboard_app.py` (20) | ✅ |
+| 07 §1, 08 §2, §3 | `dashboard` domyślny po `minio-init` (nie po Sparku), healthcheck, port loopback, tylko klucze `dashboard`; zależności przypięte, GeoJSON 27 stanów w obrazie | unit | `test_compose_file.py::test_dashboard_service_runs_by_default_after_minio_init_only`, `::test_dashboard_image_pins_its_dependencies_and_vendors_the_geojson`, `::test_dockerfiles_pin_base_images` | ✅ |
+| 07 §7 | każda strona w `AppTest` na danych w MinIO (z hosta i wewnątrz obrazu); KPI = `delta_scan` DuckDB; konto `dashboard` czyta gold/ops, nie bronze/silver, nie zapisuje; kontener zdrowy, także przy pustym gold | integracyjny (+1 `slow`) | `tests/integration/test_dashboard.py` (14) | ✅ |
+| 07 §7 | KPI dashboardu = `sim.v_truth_*` po zakończeniu przebiegu | e2e | etap 5 | ⏳ e2e |
+| 07 §7 | podczas symulacji świeżość CDC < 30 s i opóźnienie e2e (p95 silver < 60 s, gold < 120 s) widoczne na dashboardzie | e2e | etap 5 | ⏳ e2e |
 | 05 §10, 07 | uzgadnianie `sim.v_truth_*` = silver; sumy gold = sumy silver (jednorazowo na stosie: [05-spark.md](05-spark.md) §12 „Pomiary”) | e2e | etap 5 | ⏳ e2e |
 | 05 §10 | `kill` Sparka w trakcie strumienia, restart → uzgadnianie zgodne | e2e (awaria) | etap 5 | ⏳ e2e |
 | 05 §10 | opóźnienie end-to-end poniżej progu przy domyślnym tempie (progi w 05 §12) | e2e | etap 5 | ⏳ e2e |
@@ -329,7 +336,7 @@ make down                 # stop, dane zostają
 make reset                # stop + wolumeny usunięte (pełny reset)
 ```
 
-Adresy z hosta (wszystkie tylko z tej maszyny, porty wiązane do `127.0.0.1`): Postgres `localhost:5432` (`shop`, role z `.env`), Kafka `localhost:9092`, Schema Registry `http://localhost:8081`, Kafka Connect `http://localhost:8083`, MinIO API `http://127.0.0.1:9000`, konsola MinIO `http://127.0.0.1:9091` (login root z `.env`), Spark UI `localhost:4040` (etap 3), dashboard `http://localhost:8501` (etap 5).
+Adresy z hosta (wszystkie tylko z tej maszyny, porty wiązane do `127.0.0.1`): Postgres `localhost:5432` (`shop`, role z `.env`), Kafka `localhost:9092`, Schema Registry `http://localhost:8081`, Kafka Connect `http://localhost:8083`, MinIO API `http://127.0.0.1:9000`, konsola MinIO `http://127.0.0.1:9091` (login root z `.env`), Spark UI `localhost:4040` (etap 3), dashboard `http://localhost:8501` (etap 4).
 
 Pierwsze uruchomienie buduje `wpdb/minio` ze źródeł (ok. 2 min, cache BuildKit) i pobiera 6 obrazów. Docker Hub bez logowania limituje pobrania do 100/h na adres IP; przy `429 Too Many Requests` wystarczy `docker login` albo odczekanie.
 
@@ -357,6 +364,7 @@ Stan na 2026-10-20 (decyzja użytkownika z etapu 0, szczegóły w [06-minio-delt
 - **Rozstrzygnięte (etap 3): kontrakt dla Sparka** (03 §13): dekodowanie per `schema_id` (`lakehouse/avro.py`), tombstones odfiltrowane, powtórki z tym samym `source.lsn` ignorowane przez strażnika LSN w `MERGE`; testy w §10.
 - **Otwarte (dla `database-cdc`, zaobserwowane w etapie 3):** na stosie bezczynnym przez ponad dobę (symulator w fazie `done`, tylko heartbeat) odtworzenie kontenera `connect` (`docker compose up -d --build`) skończyło się zadaniem `FAILED`: „The connector is trying to read change stream starting at … lsn=0/50B8408 …, but this is no longer available on the server”, podczas gdy slot miał już `restart_lsn` 0/50BBB58 (offset w `connect-offsets` = LSN ostatniej zmiany danych sprzed doby, a heartbeat przesuwał slot). Do sprawdzenia, czy offset heartbeatu jest zapisywany i czy `offset.mismatch.strategy`/`slot` wymaga zmiany; obejście: `make reset`.
 - **Etap 3 → testy:** testy etapów 1–2 modyfikują współdzielony stos, który Spark teraz przetwarza (sondy `zz_stage2_probe_*` dostają tabele bronze/silver; zapytanie silver tabeli usuniętej jest wygaszane po 2 min; `ADD COLUMN delivery_channel` na `orders` restartuje zapytania `silver_orders` i `silver_to_gold`, co jest obsługiwane automatycznie).
+- **Rozstrzygnięte (etap 4): dashboard jako usługa domyślna.** Profil `pipeline` nie jest już używany przez żadną usługę (`docker compose --profile pipeline config` nadal poprawne, test `test_compose_config_valid` i CI bez zmian); `dashboard` czeka tylko na `minio-init`, więc wstaje przed Sparkiem i pokazuje „czekam na dane”. Limit 512 MB zmierzony (§7). Obraz 1,08 GB (pyarrow, deltalake, DuckDB); cache `uv` jest montowany w buildzie (`--mount=type=cache`), nie trafia do obrazu (bez tego 1,88 GB). Ten sam wzorzec skróciłby obrazy `simulator` i `consumer` (do decyzji `platform-devops`).
 - **Rozstrzygnięte (etap 3): RAM pełnego stosu** zmierzony (§7): ≈ 5.3–5.8 GB zajęte w trakcie strumienia przy limitach ≈ 9.5 GB; Spark 3 GB (2.6 GB zmierzone), MinIO podniesiony do 1 GB (493 MB zmierzone przy 512 MB). Heap Connecta zostaje (1.13 GB maks.).
 - **Tematy `connect-offsets`/`connect-status` z 1 partycją**: wystarczające dla jednego workera; Connect przyjmuje istniejące tematy bez zmian.
 - **CI:** cache Go w GHA i logowanie do Docker Hub (§11).
