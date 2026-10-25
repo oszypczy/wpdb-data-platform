@@ -66,6 +66,19 @@ Po każdym etapie system działa i jest zweryfikowany.
 
 Decyzja 2026-10-21: testy e2e (wiersze „e2e” w sekcjach Testy, dziś ⏳) powstają dopiero na końcu, gdy cała platforma jest w wersji docelowej.
 
+## Pozostało do zrobienia (stan 2026-10-25, po etapie 4)
+
+Etap 5:
+- testy e2e z awariami i uzgadnianiem Postgres ↔ Delta, w tym zgodność KPI dashboardu z widokami prawdy (`sim.v_truth_*`),
+- jedna pełna weryfikacja `qa-engineer` etapów 3–5,
+- dokumentacja wdrożenia.
+
+Otwarte poprawki do domknięcia po drodze (szczegóły w [08-operations.md](08-operations.md) §14):
+- wolny test consumera (`test_consumer.py::test_consumer_stats_mode…`), przez który szybki `make test-integration` trwa ok. 11 min zamiast ok. 2 min,
+- restart Connect po długim postoju: zapisany offset starszy niż `restart_lsn` slotu, zadanie `FAILED` (dziś obejście `make reset`),
+- limit czasu joba `integration` w CI (`timeout-minutes: 40` na granicy),
+- usunięcie nieużywanego profilu compose `pipeline` (CI i `test_compose_config_valid` nadal go podają).
+
 ## Otwarte kwestie
 
 - Dashboard to dodatkowy kontener poza diagramem z `requirements/`. Trzeba potwierdzić z prowadzącym, że nie liczy się jako „nowy komponent”.
