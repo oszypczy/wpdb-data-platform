@@ -31,7 +31,7 @@ LAT = {"silver": (60, 120), "gold": (120, 240)}
 def tile(col, label: str, value: float | None, warn: float, crit: float, help: str) -> None:
     s = ui.status(value, warn, crit)
     col.metric(label, ui.seconds(value), help=help)
-    col.caption(f"{charts.STATUS_ICON[s]} {ui.STATUS_LABEL[s]}")
+    col.caption(ui.status_caption(s))
 
 
 @ui.live

@@ -267,6 +267,7 @@ def test_dashboard_service_runs_by_default_after_minio_init_only():
         "MINIO_DASHBOARD_ACCESS_KEY",
         "MINIO_DASHBOARD_SECRET_KEY",
         "DASHBOARD_REFRESH_S",
+        "DASHBOARD_BRL_USD",
     }
     assert env["S3_ENDPOINT"] == "http://minio:9000"
     assert svc["deploy"]["resources"]["limits"]["memory"]

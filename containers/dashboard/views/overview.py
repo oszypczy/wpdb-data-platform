@@ -1,4 +1,4 @@
-"""Przegląd: headline KPIs and the simulation clock (07 §2)."""
+"""Przegląd: headline KPIs and the simulation clock (07 §2); amounts in USD."""
 
 import streamlit as st
 
@@ -15,13 +15,18 @@ def body() -> None:
     if k.is_empty:
         ui.waiting()
         return
+    k = ui.usd_fields(k, "revenue", "gross_sales", "corrections", "freight", "avg_basket")
     st.subheader(f"Stan na {ui.sim_time(k.sim_clock)} (czas symulacji)")
     c = st.columns(5)
     c[0].metric(
         "Przychód netto",
-        ui.money(k.revenue),
-        help="Suma cen pozycji zamówień (fact_order_items); pozycje anulowanych "
-        "zamówień są usunięte, więc korekty są już odjęte.",
+        ui.money(k.revenue, decimals=0),  # whole dollars: the full amount fits the tile
+        help=ui.md(
+            f"Suma cen pozycji zamówień (fact_order_items): {ui.money(k.revenue)}. Pozycje "
+            "anulowanych zamówień są usunięte, więc to sprzedaż brutto "
+            f"{ui.money(k.gross_sales)} plus korekty {ui.money(k.corrections)}. "
+            f"Fracht {ui.money(k.freight)} nie wchodzi do przychodu."
+        ),
     )
     c[1].metric("Zamówienia", ui.number(k.orders), help="Wiersze fact_orders_lifecycle.")
     c[2].metric(
@@ -40,16 +45,8 @@ def body() -> None:
         f"{ui.number(k.median_delivery_days, 1)} dni",
         help="Mediana dni od zakupu do dostawy (zamówienia dostarczone).",
     )
-    st.caption(
-        ui.md(
-            f"Sprzedaż brutto {ui.money(k.gross_sales)}, korekty po anulacjach "
-            f"{ui.money(k.corrections)} (przychód netto = brutto + korekty), fracht "
-            f"{ui.money(k.freight)}; {ui.number(k.items)} pozycji w "
-            f"{ui.number(k.orders_with_items)} zamówieniach, spóźnione {ui.number(k.late)} "
-            f"z {ui.number(k.delivered)} dostarczonych."
-        )
-    )
     daily = r.derive("revenue_ts", [ui.REVENUE_HOURLY], q.revenue_timeseries, "day", None)
+    daily = ui.usd_frame(daily, "sales", "corrections", "revenue", "freight")
     st.markdown("**Przychód dzienny**")
     ui.chart(charts.revenue_bars(daily), key="overview_daily")
 

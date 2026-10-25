@@ -26,13 +26,14 @@ def test_page_renders_on_small_delta_tables(page, small_lake, monkeypatch):
 
 
 def test_overview_shows_the_kpis_and_the_simulation_clock(small_lake, monkeypatch):
+    """Amounts are shown in USD at the default rate 0.3135 (lake: R$ 180 and R$ 90)."""
     monkeypatch.setenv("DASHBOARD_LAKE_ROOT", str(small_lake))
     at = render("overview")
     metrics = {m.label: m.value for m in at.metric}
     assert metrics == {
-        "Przychód netto": "R$ 180,00",
+        "Przychód netto": "$ 56",
         "Zamówienia": "4",
-        "Średni koszyk": "R$ 90,00",
+        "Średni koszyk": "$ 28,22",
         "Spóźnienia": "50,0 %",
         "Mediana dostawy": "6,0 dni",
     }
@@ -47,7 +48,7 @@ def test_filters_are_outside_the_live_fragment(small_lake, monkeypatch):
     at.multiselect[0].set_value(["RJ"]).run()
     assert problems(at) == []
     metrics = {m.label: m.value for m in at.metric}
-    assert metrics["Przychód netto"] == "R$ 30,00"
+    assert metrics["Przychód netto"] == "$ 9,41"
     at.radio[0].set_value("Godzina").run()
     assert at.multiselect[0].value == ["RJ"]
 

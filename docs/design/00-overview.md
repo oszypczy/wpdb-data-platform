@@ -78,6 +78,7 @@ Otwarte poprawki do domknięcia po drodze (szczegóły w [08-operations.md](08-o
 - restart Connect po długim postoju: zapisany offset starszy niż `restart_lsn` slotu, zadanie `FAILED` (dziś obejście `make reset`),
 - limit czasu joba `integration` w CI (`timeout-minutes: 40` na granicy),
 - usunięcie nieużywanego profilu compose `pipeline` (CI i `test_compose_config_valid` nadal go podają).
+- testy integracyjne zostawiają ślad w danych biznesowych: zamówienia `test-stage2-bad-o-…` z testu kwarantanny są usunięte z Postgresa, ale ich przejścia statusów zostały w historii gold (`status_transitions`, `agg_status_funnel`; 5 × `(new) → delivered` i 5 × `delivered → created` na lejku). Testy nie powinny pisać do głównych tabel żywego stosu, a stos do oddania stawiamy od zera (`make reset`).
 
 ## Otwarte kwestie
 

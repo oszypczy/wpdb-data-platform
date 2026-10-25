@@ -1,4 +1,4 @@
-"""Logistyka: delivery time distribution, % late per state, time to approval (07 §2)."""
+"""Logistyka: delivery time distribution, % late per state, median time to approval (07 §2)."""
 
 import streamlit as st
 
@@ -47,13 +47,6 @@ def body() -> None:
             st.info("Brak dostarczonych zamówień.")
         else:
             ui.chart(charts.bars(late, "state", "late_pct", y_title="% spóźnień"), key="late")
-    st.markdown("**Czas do akceptacji płatności** (do 72 h)")
-    ap = r.derive("approval_times", [ui.LIFECYCLE], q.approval_times)
-    ap = ap[ap["h_to_approve"] <= 72]
-    if ap.empty:
-        st.info("Brak zaakceptowanych zamówień.")
-    else:
-        ui.chart(charts.histogram(ap, "h_to_approve", None, "godziny", nbins=72), key="ap")
 
 
 body()

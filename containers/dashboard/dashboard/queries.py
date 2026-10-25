@@ -332,15 +332,6 @@ def late_by_state(lifecycle: Any) -> pd.DataFrame:
     )
 
 
-def approval_times(lifecycle: Any) -> pd.DataFrame:
-    """Approved orders with the hours from purchase to approval."""
-    return sql(
-        """SELECT order_id, h_to_approve FROM lc
-           WHERE h_to_approve IS NOT NULL ORDER BY order_id""",
-        lc=lifecycle,
-    )
-
-
 # ----------------------------------------------------------------------- products
 def top_categories(items: Any, products: Any, n: int = 15) -> pd.DataFrame:
     """Top ``n`` product categories (English names) by revenue, with freight, items

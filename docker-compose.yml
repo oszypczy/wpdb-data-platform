@@ -411,6 +411,7 @@ services:
       MINIO_DASHBOARD_ACCESS_KEY: ${MINIO_DASHBOARD_ACCESS_KEY:?set it in .env}
       MINIO_DASHBOARD_SECRET_KEY: ${MINIO_DASHBOARD_SECRET_KEY:?set it in .env}
       DASHBOARD_REFRESH_S: 10
+      DASHBOARD_BRL_USD: "0.3135"  # display rate, 07 §5
     ports:
       - "127.0.0.1:8501:8501"
     depends_on:

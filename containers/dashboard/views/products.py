@@ -16,23 +16,24 @@ def body() -> None:
     if top.empty:
         ui.waiting()
         return
+    top = ui.usd_frame(top, "revenue", "freight")
     long = top.melt(
-        id_vars="category", value_vars=["revenue", "freight"], var_name="miara", value_name="R$"
+        id_vars="category", value_vars=["revenue", "freight"], var_name="miara", value_name="USD"
     ).replace({"miara": {"revenue": "przychód", "freight": "fracht"}})
     ui.chart(
         charts.bars(
             long,
             "category",
-            "R$",
+            "USD",
             color="miara",
             horizontal=True,
-            y_title="R$",
+            y_title="USD",
             height=max(360, 28 * len(top)),
             order=["przychód", "fracht"],
         ),
         key="top",
     )
-    ui.table(top)
+    ui.table(top, column_config=ui.money_columns("revenue", "freight"))
 
 
 body()

@@ -9,7 +9,8 @@ from dashboard import queries as q
 st.title("Podróż w czasie")
 st.caption(
     "Każdy commit Sparka to nowa wersja tabeli Delta. Starsze wersje są czytelne, dopóki "
-    "VACUUM nie usunie ich plików (retencja gold 168 h, 06 §7)."
+    "VACUUM nie usunie ich plików (retencja gold 168 h, 06 §7). Sumy kolumn są surowe, "
+    "jak w tabeli, więc kwoty są tu w BRL."
 )
 tables = list(contract.TIME_TRAVEL_MEASURES)
 table = st.selectbox("Tabela", tables, format_func=lambda t: t.removeprefix("gold/"))

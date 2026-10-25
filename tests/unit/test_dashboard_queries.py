@@ -134,7 +134,6 @@ def test_logistics_queries(lake):
     late = q.late_by_state(lc)
     assert late[["state", "delivered", "late", "late_pct"]].values.tolist() == [
         ["RJ", 1, 1, 100.0], ["SP", 1, 0, 0.0]]  # fmt: skip
-    assert q.approval_times(lc)["h_to_approve"].tolist() == [0.5, 2.0, 0.25, 1.0]
 
 
 def test_top_categories_use_english_names(lake):
@@ -225,7 +224,6 @@ def test_every_query_on_empty_tables_returns_empty_results(empty_lake):
                                                  ("canceled",)),
         "delivery_times": q.delivery_times(e["gold/fact_orders_lifecycle"]),
         "late_by_state": q.late_by_state(e["gold/fact_orders_lifecycle"]),
-        "approval_times": q.approval_times(e["gold/fact_orders_lifecycle"]),
         "top_categories": q.top_categories(e["gold/fact_order_items"], e["gold/dim_product"]),
         "orders_per_customer": q.orders_per_customer(e["gold/fact_orders_lifecycle"]),
         "customer_moves": q.customer_moves(e["gold/dim_customer"]),

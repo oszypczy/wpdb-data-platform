@@ -44,7 +44,6 @@ SEQUENTIAL = [
 # ordinal steps for funnel stages: the lightest still clears 2:1 on both surfaces
 ORDINAL = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab"]
 STATUS = {"good": "#0ca30c", "warning": "#fab219", "serious": "#ec835a", "critical": "#d03b3b"}
-STATUS_ICON = {"good": "🟢", "warning": "🟡", "serious": "🟠", "critical": "🔴"}
 
 GEOJSON_PATH = Path(__file__).resolve().parent.parent / "assets" / "brazil-states.geojson"
 
@@ -86,7 +85,7 @@ def revenue_bars(df: pd.DataFrame) -> go.Figure:
         mode="lines",
         line={"color": SERIES[2]},
     )
-    fig.update_layout(barmode="relative", yaxis_title="R$")
+    fig.update_layout(barmode="relative", yaxis_title="USD")
     return finish(fig, hover="x unified")
 
 
@@ -171,6 +170,9 @@ def funnel(df: pd.DataFrame) -> go.Figure:
             y=df["stage"],
             x=df["entered"],
             textinfo="value+percent initial",
+            # no "percent total": a share of the sum of all stages means nothing here
+            hovertemplate="%{y}: %{x}<br>%{percentInitial:.1%} utworzonych"
+            "<br>%{percentPrevious:.1%} poprzedniego etapu<extra></extra>",
             marker={"color": ORDINAL[: len(df)]},
             connector={"line": {"width": 0}},
         )
@@ -195,7 +197,7 @@ def choropleth(df: pd.DataFrame, metric: str, label: str) -> go.Figure:
             metric: False,
         },
         labels={
-            "revenue": "przychód (R$)",
+            "revenue": "przychód (USD)",
             "orders": "zamówienia",
             "late_pct": "% spóźnień",
             "state": "stan",

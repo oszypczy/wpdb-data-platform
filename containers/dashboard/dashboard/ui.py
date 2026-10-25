@@ -3,18 +3,26 @@ empty states and number formatting. Layout and charts only; logic is in ``querie
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from collections.abc import Callable
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
+import pandas as pd
 import streamlit as st
 
 from dashboard.lake import Lake, LakeConfig, VersionedReader
 
 # 07 §1: data refresh every 10 s (only the fragment with the data reruns, 07 §3)
 REFRESH_S = float(os.environ.get("DASHBOARD_REFRESH_S", "10"))
+
+# The lake keeps Olist amounts in BRL (they reconcile with the Postgres truth views);
+# the dashboard shows them in USD at one fixed rate, converted only for display.
+# Default: 1 / 3.19, the average USD/BRL rate of 2017 (the bulk of the dataset).
+BRL_USD = Decimal(os.environ.get("DASHBOARD_BRL_USD", "0.3135"))
+CENT = Decimal("0.01")
 
 ITEMS = "gold/fact_order_items"
 LIFECYCLE = "gold/fact_orders_lifecycle"
@@ -62,7 +70,7 @@ def live(fn: Callable[[], Any]) -> Callable[[], Any]:
 
 
 def waiting() -> None:
-    st.info(WAITING, icon="⏳")
+    st.info(WAITING)
 
 
 def now_utc() -> datetime:
@@ -74,15 +82,37 @@ def _group(n: float, decimals: int) -> str:
     return s.replace(",", " ").replace(".", ",")
 
 
-def money(v: Decimal | float | None) -> str:
+def usd(v: Decimal | None) -> Decimal | None:
+    """A BRL amount from the lake in USD, rounded to cents."""
+    return None if v is None else (Decimal(v) * BRL_USD).quantize(CENT, ROUND_HALF_UP)
+
+
+def usd_fields(obj: Any, *fields: str) -> Any:
+    """A copy of a KPI dataclass with the given BRL fields in USD."""
+    return dataclasses.replace(obj, **{f: usd(getattr(obj, f)) for f in fields})
+
+
+def usd_frame(df: pd.DataFrame, *cols: str) -> pd.DataFrame:
+    """A copy of a chart frame with the given BRL columns in USD."""
+    return df.assign(**{c: df[c] * float(BRL_USD) for c in cols})
+
+
+def money_columns(*cols: str) -> dict[str, Any]:
+    """``column_config`` for st.dataframe: USD columns shown with cents."""
+    return {c: st.column_config.NumberColumn(f"{c} (USD)", format="%.2f") for c in cols}
+
+
+def money(v: Decimal | float | None, decimals: int = 2) -> str:
+    """Format an amount that is already in USD."""
     if v is None:
         return "–"
-    f = float(v)
-    return f"{'−' if f < 0 else ''}R$ {_group(abs(f), 2)}"
+    # half-up like usd(): via the shortest repr, so 9.405 (a float sum) shows as 9,41
+    d = Decimal(str(v)).quantize(Decimal(1).scaleb(-decimals), ROUND_HALF_UP)
+    return f"{'−' if d < 0 else ''}$ {_group(abs(d), decimals)}"
 
 
 def md(text: str) -> str:
-    """Escape ``$`` for st.markdown/st.caption (it would start LaTeX: "R$ … R$")."""
+    """Escape ``$`` for st.markdown/st.caption/help (two of them would start LaTeX)."""
     return text.replace("$", "\\$")
 
 
@@ -117,6 +147,12 @@ def status(value: float | None, warn: float, crit: float) -> str:
 
 
 STATUS_LABEL = {"good": "OK", "warning": "uwaga", "critical": "problem"}
+STATUS_COLOR = {"good": "green", "warning": "orange", "critical": "red"}
+
+
+def status_caption(s: str) -> str:
+    """Coloured label of a health tile (colour + text, no emoji)."""
+    return f":{STATUS_COLOR[s]}[● {STATUS_LABEL[s]}]"
 
 
 def chart(fig: Any, key: str | None = None) -> None:
