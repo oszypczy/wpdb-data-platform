@@ -131,7 +131,9 @@ class Supervisor:
         table) once it has been idle for RETIRE_IDLE_S: nothing can arrive any more, and
         idle queries would accumulate. Its silver table stays as the last state."""
         now = time.time()
-        for name in [n for n in self.managed if n.startswith("silver_")]:
+        # silver_<table> queries only: silver_to_gold also starts with "silver_" but reads
+        # the silver tables, not a topic, and was stopped and restarted every idle period
+        for name in [n for n in self.managed if n.startswith("silver_") and n != "silver_to_gold"]:
             table = name[len("silver_") :]
             if table in GOLD_SOURCES or topic_of_table(table) in topics:
                 continue
