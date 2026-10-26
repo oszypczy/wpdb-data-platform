@@ -36,7 +36,7 @@ Szczegóły każdego komponentu znajdują się w osobnym dokumencie. Tutaj są t
 | 4 | [Kafka + Schema Registry](04-kafka.md) | KRaft single node, dwa listenery, consumer AVRO z walidacją | projekt tematów jako kod (wszystkie tematy tabel kompaktowane jako lustra); kolejność per wiersz; zgodność BACKWARD; consumer: statystyki, reguły, śledzenie zamówienia; acks=all + idempotencja + zstd |
 | 5 | [Spark](05-spark.md) | odczyt z Kafki, deserializacja AVRO, transformacja | dekodowanie per `schema_id` (ewolucja); **bronze** (exactly-once, `txnAppId`) → **silver** (MERGE ze strażnikiem LSN, miękkie usuwanie, PK ze schematu klucza) → **gold** (gwiazda, fakt z akumulującym snapshotem, SCD2, okna z watermarkiem, lejek i korekty); kwarantanna; metryki i opóźnienie e2e |
 | 6 | [MinIO + Delta](06-minio-delta.md) | zapis w formacie Delta, dokumentacja odczytu | kubełek per warstwa + konta per usługa (idempotentny `minio-init`); audyt, time travel, RESTORE; CDF na silver; CHECK; OPTIMIZE/Z-ORDER/VACUUM z pomiarem; checkpointy w MinIO (bezstanowy Spark); odczyt przez DuckDB i delta-rs |
-| 7 | [Dashboard (Streamlit)](07-dashboard.md) | odczyt gold, wykresy, odświeżanie | 9 stron (biznes, mapa, lejek, logistyka, klienci SCD2, zdrowie potoku, podróż w czasie); tylko Delta przez delta-rs/DuckDB; odczyt tylko po zmianie wersji tabeli; Grafana rozważona i odrzucona (brak źródła Delta) |
+| 7 | [Dashboard (Streamlit)](07-dashboard.md) | odczyt gold, wykresy, odświeżanie | 8 stron (biznes, mapa, lejek, logistyka, klienci SCD2, zdrowie potoku); tylko Delta przez delta-rs/DuckDB; odczyt tylko po zmianie wersji tabeli; Grafana rozważona i odrzucona (brak źródła Delta) |
 | 8 | Operacje i testy | jeden `docker compose up` | healthchecki + `service_healthy`; kontenery startowe; zestaw testów automatycznych (patrz niżej) |
 
 ## Zasada: weryfikacja = testy automatyczne
@@ -61,7 +61,7 @@ Po każdym etapie system działa i jest zweryfikowany.
 | 1 | Dane + Business System + PostgreSQL | ✅ | ✅ (2026-10-20; zweryfikowane przez `qa-engineer`: 40 testów jednostkowych, 49 integracyjnych) |
 | 2 | Debezium + Kafka + Schema Registry (+ consumer) | ✅ | ✅ (2026-10-21; zweryfikowane przez `qa-engineer`: 69 testów jednostkowych, 82 integracyjne; `containers/connect/connectors/olist-postgres.json`, `containers/consumer/`, `20-heartbeat.sql`; kontrakt dla Sparka w [03](03-debezium.md) §13) |
 | 3 | Spark + MinIO/Delta: bronze → silver → gold (dawne etapy 3 i 4 scalone 2026-10-21, jedna weryfikacja QA) | ✅ | ✅ (2026-10-23, zbudowane przez `streaming-lakehouse`, weryfikacja `qa-engineer` razem z całością na końcu (decyzja 2026-10-24); `containers/spark/`, ustalenia w [05](05-spark.md) §12 i [06](06-minio-delta.md) §7–§9; e2e w etapie 5) |
-| 4 | Dashboard Streamlit | ✅ | ✅ (2026-10-24, zbudowany przez `analytics-dashboard`, weryfikacja `qa-engineer` razem z etapami 3–5 na końcu; `containers/dashboard/`: 9 stron, warstwa zapytań delta-rs + DuckDB, odczyt tylko po zmianie wersji tabeli, mapa z GeoJSON Natural Earth; 41 testów jednostkowych (w tym 2 testy compose), 14 integracyjnych; e2e w etapie 5) |
+| 4 | Dashboard Streamlit | ✅ | ✅ (2026-10-24, zbudowany przez `analytics-dashboard`, weryfikacja `qa-engineer` razem z etapami 3–5 na końcu; `containers/dashboard/`: 9 stron (od 2026-10-25: 8), warstwa zapytań delta-rs + DuckDB, odczyt tylko po zmianie wersji tabeli, mapa z GeoJSON Natural Earth; 41 testów jednostkowych (w tym 2 testy compose), 14 integracyjnych; e2e w etapie 5) |
 | 5 | Testy e2e z awariami i uzgadnianiem Postgres ↔ Delta na docelowej wersji platformy, jedna pełna weryfikacja `qa-engineer` etapów 3–5, dokumentacja wdrożenia | ⏳ | ⏳ |
 
 Decyzja 2026-10-21: testy e2e (wiersze „e2e” w sekcjach Testy, dziś ⏳) powstają dopiero na końcu, gdy cała platforma jest w wersji docelowej.
@@ -79,6 +79,9 @@ Otwarte poprawki do domknięcia po drodze (szczegóły w [08-operations.md](08-o
 - limit czasu joba `integration` w CI (`timeout-minutes: 40` na granicy),
 - usunięcie nieużywanego profilu compose `pipeline` (CI i `test_compose_config_valid` nadal go podają).
 - testy integracyjne zostawiają ślad w danych biznesowych: zamówienia `test-stage2-bad-o-…` z testu kwarantanny są usunięte z Postgresa, ale ich przejścia statusów zostały w historii gold (`status_transitions`, `agg_status_funnel`; 5 × `(new) → delivered` i 5 × `delivered → created` na lejku). Testy nie powinny pisać do głównych tabel żywego stosu, a stos do oddania stawiamy od zera (`make reset`).
+
+Pomysły na rozszerzenie dashboardu (do decyzji, 2026-10-26):
+- strona „Płatności i opinie”: udział typów płatności (liczba i wartość), rozkład liczby rat, rozkład ocen 1–5, średnia ocena tygodniowo i ocena przy dostawie w terminie vs po terminie. Dane są w silver (`order_payments.payment_type`, `payment_installments`; `order_reviews.review_score`), ale gold ma tylko sumę płatności na zamówienie, a opinii wcale. Potrzebne: dwie tabele gold w Sparku (płatności z typem i ratami; opinie połączone z `fact_orders_lifecycle`), nowa strona, testy i widoki prawdy (`sim.v_truth_payments` już jest, dla opinii trzeba dodać).
 
 ## Otwarte kwestie
 
