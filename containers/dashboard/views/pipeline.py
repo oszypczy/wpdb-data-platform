@@ -1,31 +1,61 @@
-"""Zdrowie potoku: CDC freshness, end-to-end latency, micro-batches, quarantine (07 §2).
+"""Zdrowie potoku: container status, CDC freshness, end-to-end latency and quarantine
+(07 §2).
 
-Everything comes from the ops Delta tables written by Spark; the dashboard reads no
-Kafka and no Postgres (replication slot lag is checked by tests, 02 §5).
+Data comes from the ops Delta tables written by Spark; the dashboard reads no Kafka and
+no Postgres (replication slot lag is checked by tests, 02 §5). Container status comes
+from network probes of health endpoints (``dashboard.probes``); Postgres and the
+simulator are not contacted, their state is inferred from the lake.
 """
 
 from datetime import timedelta
 
 import streamlit as st
 
-from dashboard import charts, ui
+from dashboard import charts, probes, ui
 from dashboard import queries as q
 
 st.title("Zdrowie potoku")
 WINDOWS = {"1 h": 1, "6 h": 6, "24 h": 24, "wszystko": None}
-f1, f2 = st.columns([1, 3])
-window = f1.radio("Okno (od ostatniego pomiaru)", list(WINDOWS), horizontal=True)
-MAIN_QUERIES = ["kafka_to_bronze", "silver_orders", "silver_to_gold", "gold_agg_revenue"]
-queries_sel = f2.multiselect(
-    "Zapytania strumieniowe na wykresie",
-    MAIN_QUERIES
-    + ["silver_order_items", "silver_customers", "gold_transitions", "gold_agg_funnel"],
-    default=MAIN_QUERIES,
-)
+window = st.radio("Okno (od ostatniego pomiaru)", list(WINDOWS), horizontal=True)
 
 # thresholds of the status icons (e2e thresholds of the final stage: 05 §12)
 CDC_WARN_S, CDC_CRIT_S = 30, 120
 LAT = {"silver": (60, 120), "gold": (120, 240)}
+
+
+def containers(fresh, last_business) -> None:
+    """One cell per long-running container: probed directly, or inferred (Postgres from
+    the CDC heartbeat, the simulator from the last business change in the lake)."""
+    status = {
+        r.service: ("good", "OK", r.detail) if r.ok else ("critical", "problem", r.detail)
+        for r in probes.check_all()
+    }
+    age = fresh["freshness_s"]
+    hb = (
+        f"pośrednio: heartbeat CDC sprzed {ui.seconds(age)}"
+        if age is not None
+        else "pośrednio: brak heartbeatu CDC"
+    )
+    status["postgres"] = (
+        ("good", "OK", hb) if age is not None and age < CDC_CRIT_S else ("critical", "problem", hb)
+    )
+    since = f"{ui.seconds(last_business)} temu" if last_business is not None else "–"
+    status["simulator"] = ("info", "bez sondy", f"ostatnia zmiana biznesowa w potoku: {since}")
+    status["consumer"] = (
+        "info",
+        "na żądanie",
+        "narzędzie uruchamiane ręcznie: docker compose run --rm consumer",
+    )
+    status["dashboard"] = ("good", "OK", "ta strona")
+    st.markdown(
+        "**Kontenery**",
+        help="Układ jak na diagramie architektury. Kafka, Schema Registry, Connect (konektor "
+        "i zadanie RUNNING), MinIO i Spark: sondy sieciowe co odświeżenie. Postgres i "
+        "symulator bez sondy (dashboard nie łączy się z bazą): Postgres wg świeżości CDC. "
+        "Consumer to narzędzie uruchamiane na żądanie. "
+        "Szczegóły po najechaniu na prostokąt.",
+    )
+    ui.chart(charts.architecture(status), key="containers")
 
 
 def tile(col, label: str, value: float | None, warn: float, crit: float, help: str) -> None:
@@ -67,6 +97,13 @@ def body() -> None:
         ui.number(int(quarantine["rows"].sum()) if len(quarantine) else 0),
         help="Wiersze łamiące reguły jakości.",
     )
+    lat_ts = r.derive("latency_ts", [ui.LATENCY], q.latency_timeseries, None)
+    last_business = None
+    if not lat_ts.empty:
+        last = lat_ts["measured_at"].max().to_pydatetime()
+        last_business = (ui.now_utc().replace(tzinfo=None) - last).total_seconds()
+    containers(fresh, last_business)  # also while gold/ops are still empty
+
     if fresh["heartbeats"] == 0 and lat.empty:
         ui.waiting()
         return
@@ -75,7 +112,6 @@ def body() -> None:
 
     hours = WINDOWS[window]
     e2e = r.get(ui.LATENCY)
-    lat_ts = r.derive("latency_ts", [ui.LATENCY], q.latency_timeseries, None)
     if hours and not lat_ts.empty:
         lat_ts = lat_ts[
             lat_ts["measured_at"] >= lat_ts["measured_at"].max() - timedelta(hours=hours)
@@ -89,33 +125,11 @@ def body() -> None:
             key="lat",
         )
 
-    st.markdown("**Mikropaczki: czas trwania (s)**")
-    sm = r.derive("stream_ts", [ui.METRICS], q.stream_timeseries, None)
-    sm = sm[sm["query_name"].isin(queries_sel)]
-    if hours and not sm.empty:
-        sm = sm[sm["progress_at"] >= sm["progress_at"].max() - timedelta(hours=hours)]
-    if sm.empty:
-        st.info("Brak metryk wybranych zapytań.")
+    st.markdown("**Kwarantanna per reguła**")
+    if quarantine.empty:
+        st.success("Brak wierszy w kwarantannie.")
     else:
-        ui.chart(
-            charts.lines(sm, "progress_at", "duration_s", "query_name", "s", order=queries_sel),
-            key="sm",
-        )
-
-    left, right = st.columns(2)
-    with left:
-        st.markdown("**Zapytania strumieniowe (ostatnie 20 paczek)**")
-        ui.table(r.derive("stream_summary", [ui.METRICS], q.stream_summary, 20))
-        st.markdown("**Opóźnienie per warstwa (ostatnia godzina pomiarów)**")
-        ui.table(lat)
-    with right:
-        st.markdown("**Kwarantanna per reguła**")
-        if quarantine.empty:
-            st.success("Brak wierszy w kwarantannie.")
-        else:
-            ui.table(quarantine)
-        st.markdown("**Utrzymanie tabel (OPTIMIZE / VACUUM)**")
-        ui.table(r.derive("maintenance", [ui.MAINTENANCE], q.maintenance_recent, 15))
+        ui.table(quarantine)
 
 
 body()

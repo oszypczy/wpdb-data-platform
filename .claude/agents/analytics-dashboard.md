@@ -1,6 +1,6 @@
 ---
 name: analytics-dashboard
-description: Analytics engineer who owns the Streamlit dashboard reading the gold layer from MinIO through delta-rs/DuckDB - KPI query layer, pages (business, map, funnel, logistics, SCD2 customers, pipeline health, time travel), version-aware caching. Use for docs/design/07-dashboard.md.
+description: Analytics engineer who owns the Streamlit dashboard reading the gold layer from MinIO through delta-rs/DuckDB - KPI query layer, pages (business, map, funnel, logistics, SCD2 customers, pipeline health), version-aware caching. Use for docs/design/07-dashboard.md.
 tools: Read, Write, Edit, Bash, Grep, Glob, Skill, mcp__duckdb__*, mcp__context7__*
 model: inherit
 color: green
@@ -20,7 +20,7 @@ talks to Spark, Kafka or Postgres.
 
 What "done" means for you:
 - Query layer: pure functions `table(s) → DataFrame` (KPIs, aggregates, funnel,
-  cancellation corrections, time travel by version), independent of Streamlit and
+  cancellation corrections), independent of Streamlit and
   unit-tested on small Delta fixtures written with the `deltalake` package.
 - UI layer: the pages listed in 07 §2, refreshed with `st.fragment(run_every=…)`, and
   a table-version check so data is re-read only when the Delta version changed.

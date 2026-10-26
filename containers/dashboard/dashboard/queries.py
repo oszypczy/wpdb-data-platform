@@ -28,7 +28,6 @@ KPI definitions (07 §2 "Przegląd"):
 
 from __future__ import annotations
 
-import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -445,40 +444,6 @@ def latency_summary(e2e: Any, window_minutes: int = 60) -> pd.DataFrame:
     )
 
 
-def stream_summary(metrics: Any, last_batches: int = 20) -> pd.DataFrame:
-    """Per streaming query: last progress, last and median batch duration over the last
-    ``last_batches`` micro-batches (s), input rows/s of the last batch, rows read."""
-    return sql(
-        f"""WITH r AS (
-                SELECT *, row_number() OVER (PARTITION BY query_name
-                                             ORDER BY progress_at DESC, batch_id DESC) AS rn
-                FROM m)
-            SELECT query_name,
-                   max(progress_at)::TIMESTAMP AS last_progress,
-                   max(batch_id)::BIGINT AS last_batch,
-                   any_value(batch_duration_ms ORDER BY rn) / 1000.0 AS last_duration_s,
-                   median(batch_duration_ms) / 1000.0 AS median_duration_s,
-                   any_value(input_rows_per_second ORDER BY rn) AS input_rows_per_s,
-                   sum(num_input_rows)::BIGINT AS rows,
-                   any_value(offsets_behind_latest ORDER BY rn) AS offsets_behind
-            FROM r WHERE rn <= {int(last_batches)}
-            GROUP BY 1 ORDER BY 1""",
-        m=metrics,
-    )
-
-
-def stream_timeseries(metrics: Any, since: datetime | None = None) -> pd.DataFrame:
-    """Micro-batches over time: duration (s), input rows/s and rows, per query."""
-    where = f"WHERE progress_at::TIMESTAMP >= TIMESTAMP '{_naive(since)}'" if since else ""
-    return sql(
-        f"""SELECT progress_at::TIMESTAMP AS progress_at, query_name, batch_id,
-                   batch_duration_ms / 1000.0 AS duration_s,
-                   input_rows_per_second, num_input_rows
-            FROM m {where} ORDER BY progress_at, query_name""",
-        m=metrics,
-    )
-
-
 def quarantine_by_rule(quarantine: Any) -> pd.DataFrame:
     """Rows in quarantine per rule, severity and source table."""
     return sql(
@@ -487,77 +452,3 @@ def quarantine_by_rule(quarantine: Any) -> pd.DataFrame:
            FROM q GROUP BY ALL ORDER BY rows DESC, rule, source_table""",
         q=quarantine,
     )
-
-
-def maintenance_recent(log: Any, n: int = 20) -> pd.DataFrame:
-    """The last ``n`` OPTIMIZE/VACUUM operations (06 §7)."""
-    return sql(
-        f"""SELECT started_at::TIMESTAMP AS started_at, table_path, operation,
-                   duration_ms, files_before, files_after
-            FROM l ORDER BY started_at DESC, table_path LIMIT {int(n)}""",
-        l=log,
-    )
-
-
-# --------------------------------------------------------------------- time travel
-def table_measures(table: str, data: Any, measures: tuple[str, ...]) -> dict[str, float]:
-    """Row count and the sum of each measure column of one table version."""
-    cols = "".join(f", coalesce(sum({c}), 0)::DOUBLE" for c in measures)
-    row = _row(f"SELECT count(*)::DOUBLE{cols} FROM t", t=data)
-    out = {"rows": float(row[0])}
-    out.update({f"sum({c})": float(v) for c, v in zip(measures, row[1:], strict=True)})
-    return out
-
-
-def compare_versions(
-    table: str, now: Any, then: Any, measures: tuple[str, ...], version: int
-) -> pd.DataFrame:
-    """Measures "now" vs "version N" and the difference (07 §2 "Podróż w czasie")."""
-    a = table_measures(table, now, measures)
-    b = table_measures(table, then, measures)
-    return pd.DataFrame(
-        {
-            "metric": list(a),
-            "now": list(a.values()),
-            f"version {version}": [b[k] for k in a],
-            "diff": [a[k] - b[k] for k in a],
-        }
-    )
-
-
-HISTORY_METRICS = (
-    "numTargetRowsInserted",
-    "numTargetRowsUpdated",
-    "numTargetRowsDeleted",
-    "numOutputRows",
-    "numAddedFiles",
-    "numRemovedFiles",
-)
-
-
-def history_frame(history: list[dict[str, Any]]) -> pd.DataFrame:
-    """``DESCRIBE HISTORY`` as a frame: version, time, operation and the main metrics."""
-    rows = []
-    for h in history:
-        m = h.get("operationMetrics") or {}
-        ts = h.get("timestamp")
-        rows.append(
-            {
-                "version": int(h.get("version", -1)),
-                "timestamp": pd.to_datetime(ts, unit="ms") if ts is not None else pd.NaT,
-                "operation": h.get("operation", ""),
-                **{k: _num(m.get(k)) for k in HISTORY_METRICS},
-            }
-        )
-    cols = ["version", "timestamp", "operation", *HISTORY_METRICS]
-    return pd.DataFrame(rows, columns=cols).sort_values("version", ascending=False)
-
-
-def _num(v: Any) -> float | None:
-    if v is None:
-        return None
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return None
-    return None if math.isnan(f) else f

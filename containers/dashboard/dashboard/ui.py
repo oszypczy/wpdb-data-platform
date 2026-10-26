@@ -34,9 +34,7 @@ PRODUCTS = "gold/dim_product"
 CUSTOMERS = "gold/dim_customer"
 HEARTBEAT = "ops/cdc_heartbeat"
 LATENCY = "ops/e2e_latency"
-METRICS = "ops/stream_metrics"
 QUARANTINE = "ops/quarantine"
-MAINTENANCE = "ops/maintenance_log"
 
 WAITING = (
     "Czekam na dane: warstwa gold jest jeszcze pusta (system dopiero wystartował "
@@ -146,8 +144,8 @@ def status(value: float | None, warn: float, crit: float) -> str:
     return "good" if value < warn else "warning" if value < crit else "critical"
 
 
-STATUS_LABEL = {"good": "OK", "warning": "uwaga", "critical": "problem"}
-STATUS_COLOR = {"good": "green", "warning": "orange", "critical": "red"}
+STATUS_LABEL = {"good": "OK", "warning": "uwaga", "critical": "problem", "info": "bez sondy"}
+STATUS_COLOR = {"good": "green", "warning": "orange", "critical": "red", "info": "gray"}
 
 
 def status_caption(s: str) -> str:

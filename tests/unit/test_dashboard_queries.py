@@ -173,35 +173,9 @@ def test_pipeline_health_queries(lake):
     ts = q.latency_timeseries(lake["ops/e2e_latency"], datetime(2026, 10, 24, 8, 0))
     assert len(ts) == 3 and ts["p95_s"].max() == 50.0
 
-    sm = q.stream_summary(lake["ops/stream_metrics"], 2).iloc[0]
-    assert (sm["query_name"], sm["last_batch"], sm["last_duration_s"], sm["rows"]) == (
-        "kafka_to_bronze", 3, 3.0, 50)  # fmt: skip
-    assert sm["median_duration_s"] == 2.5
-    assert q.stream_timeseries(lake["ops/stream_metrics"])["duration_s"].tolist() == [1, 2, 3]
-
     qr = q.quarantine_by_rule(lake["ops/quarantine"])
     assert qr[["rule", "severity", "rows"]].values.tolist() == [
         ["price_nonneg", "reject", 2], ["payment_type_defined", "warn", 1]]  # fmt: skip
-    assert len(q.maintenance_recent(lake["ops/maintenance_log"])) == 1
-
-
-def test_compare_versions_and_history_frame(lake):
-    items = lake["gold/fact_order_items"]
-    cmp = q.compare_versions("gold/fact_order_items", items, items.slice(0, 1),
-                             ("price", "freight_value"), 7)  # fmt: skip
-    assert cmp.values.tolist() == [
-        ["rows", 3.0, 1.0, 2.0],
-        ["sum(price)", 180.0, 100.0, 80.0],
-        ["sum(freight_value)", 18.0, 10.0, 8.0],
-    ]
-    assert list(cmp.columns) == ["metric", "now", "version 7", "diff"]
-    h = q.history_frame([
-        {"version": 0, "timestamp": 1_700_000_000_000, "operation": "CREATE TABLE"},
-        {"version": 1, "timestamp": 1_700_000_010_000, "operation": "MERGE",
-         "operationMetrics": {"numTargetRowsInserted": "3", "numTargetRowsUpdated": 1}},
-    ])  # fmt: skip
-    assert h["version"].tolist() == [1, 0]
-    assert h.iloc[0]["numTargetRowsInserted"] == 3.0 and pd.isna(h.iloc[1]["numOutputRows"])
 
 
 def test_every_query_on_empty_tables_returns_empty_results(empty_lake):
@@ -229,10 +203,7 @@ def test_every_query_on_empty_tables_returns_empty_results(empty_lake):
         "customer_moves": q.customer_moves(e["gold/dim_customer"]),
         "latency_timeseries": q.latency_timeseries(e["ops/e2e_latency"]),
         "latency_summary": q.latency_summary(e["ops/e2e_latency"]),
-        "stream_summary": q.stream_summary(e["ops/stream_metrics"]),
-        "stream_timeseries": q.stream_timeseries(e["ops/stream_metrics"]),
         "quarantine_by_rule": q.quarantine_by_rule(e["ops/quarantine"]),
-        "maintenance_recent": q.maintenance_recent(e["ops/maintenance_log"]),
     }  # fmt: skip
     for name, df in frames.items():
         assert df.empty and len(df.columns) > 0, name
@@ -243,10 +214,6 @@ def test_every_query_on_empty_tables_returns_empty_results(empty_lake):
         "customers"] == 0  # fmt: skip
     fresh = q.cdc_freshness(e["ops/cdc_heartbeat"], datetime(2026, 1, 1)).iloc[0]
     assert fresh["heartbeats"] == 0 and fresh["freshness_s"] is None
-    cmp = q.compare_versions("gold/fact_order_items", e["gold/fact_order_items"],
-                             e["gold/fact_order_items"], ("price",), 0)  # fmt: skip
-    assert cmp["now"].tolist() == [0.0, 0.0]
-    assert q.history_frame([]).empty
 
 
 def test_widget_values_are_quoted_in_sql(lake):

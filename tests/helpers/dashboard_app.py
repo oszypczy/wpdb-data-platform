@@ -16,7 +16,6 @@ PAGES = [
     "products",
     "customers",
     "pipeline",
-    "time_travel",
 ]
 
 

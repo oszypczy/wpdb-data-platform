@@ -22,7 +22,6 @@ PAGES = {
     ],
     "Platforma": [
         st.Page("views/pipeline.py", title="Zdrowie potoku"),
-        st.Page("views/time_travel.py", title="Podróż w czasie"),
     ],
 }
 

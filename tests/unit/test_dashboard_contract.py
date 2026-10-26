@@ -44,12 +44,6 @@ def test_every_dashboard_column_matches_the_writer_contract():
             assert field.type == writer[field.name], f"{name}.{field.name}"
 
 
-def test_time_travel_tables_and_measures_exist():
-    for name, measures in contract.TIME_TRAVEL_MEASURES.items():
-        assert name.startswith("gold/")
-        assert set(measures) <= set(contract.SCHEMAS[name].names), name
-
-
 def test_dashboard_code_never_imports_spark_kafka_or_postgres_clients():
     """07: the dashboard depends only on Delta (delta-rs, DuckDB on Arrow)."""
     banned = {"pyspark", "delta", "confluent_kafka", "kafka", "psycopg", "psycopg2", "boto3"}

@@ -132,14 +132,6 @@ class Lake:
         wanted = [f.name for f in contract.SCHEMAS[table] if f.name in ds.schema.names]
         return contract.conform(table, ds.to_table(columns=wanted))
 
-    def history(self, table: str, limit: int = 50) -> list[dict[str, Any]]:
-        try:
-            return self._open(table).history(limit)
-        except Exception as exc:
-            if _not_found(exc):
-                return []
-            raise
-
 
 @dataclass
 class ReadStats:
@@ -204,7 +196,3 @@ class VersionedReader:
             while len(self._derived) > self._max_derived:
                 self._derived.popitem(last=False)
         return result
-
-    def at_version(self, table: str, version: int) -> pa.Table:
-        """Time travel: ``table`` as of ``version`` (not cached in the live cache)."""
-        return self.lake.read(table, version)

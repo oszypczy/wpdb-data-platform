@@ -398,8 +398,10 @@ services:
 
   # ------------------------------------------------------ Streamlit dashboard (stage 4)
   # Reads only the gold and ops Delta tables in MinIO (delta-rs + DuckDB, read-only
-  # account `dashboard`); never Spark, Kafka or Postgres (07). Starts as soon as the
-  # buckets and accounts exist and is healthy with an empty gold ("czekam na dane").
+  # account `dashboard`); never Spark, Kafka or Postgres data. The pipeline page only
+  # probes the health endpoints of Kafka, Schema Registry, Connect, MinIO and Spark
+  # (07 §5). Starts as soon as the buckets and accounts exist and is healthy with an
+  # empty gold ("czekam na dane").
   dashboard:
     build:
       context: ./containers/dashboard

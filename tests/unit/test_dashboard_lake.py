@@ -1,4 +1,4 @@
-"""07 §7 unit rows on the reader: version N (time travel) and the version-aware cache
+"""07 §7 unit rows on the reader: reading a given version and the version-aware cache
 (07 §3: data is re-read only when the Delta version changed). Local Delta tables
 written with ``deltalake``; the same code reads MinIO in the container."""
 
@@ -38,29 +38,18 @@ def _item(order_id: str, price: str) -> dict:
     return row
 
 
-def test_read_at_version_n_returns_that_state(tmp_path):
-    """07 §7: "odczyt wersji N" → zwraca stan tabeli z wersji N."""
+def test_read_of_a_version_returns_that_state(tmp_path):
+    """The reader reads the version it just checked: version N gives that state."""
     fx.write(tmp_path, ITEMS, [_item("a", "10.00")])  # version 0
     fx.write(tmp_path, ITEMS, [_item("b", "20.00")])  # version 1
     fx.write(tmp_path, ITEMS, [_item("c", "30.00")], mode="overwrite")  # version 2
     lake = Lake(LakeConfig(root=str(tmp_path)))
-    reader = VersionedReader(lake)
 
     assert lake.version(ITEMS) == 2
-    by_version = {
-        v: sorted(reader.at_version(ITEMS, v).column("order_id").to_pylist()) for v in (0, 1, 2)
-    }
+    by_version = {v: sorted(lake.read(ITEMS, v).column("order_id").to_pylist()) for v in (0, 1, 2)}
     assert by_version == {0: ["a"], 1: ["a", "b"], 2: ["c"]}
-    now = reader.get(ITEMS)
-    cmp = q.compare_versions(ITEMS, now, reader.at_version(ITEMS, 1), ("price",), 1)
-    assert cmp.set_index("metric").loc["sum(price)"].tolist() == [30.0, 30.0, 0.0]
-    assert cmp.set_index("metric").loc["rows"].tolist() == [1.0, 2.0, -1.0]
-
-    hist = q.history_frame(lake.history(ITEMS, 10))
-    assert hist["version"].tolist() == [2, 1, 0]
-    assert hist["operation"].tolist() == ["WRITE"] * 3
     with pytest.raises(Exception):  # noqa: B017 - delta-rs raises its own error type
-        reader.at_version(ITEMS, 7)
+        lake.read(ITEMS, 7)
 
 
 def test_no_reread_when_the_version_did_not_change(tmp_path):
@@ -103,7 +92,6 @@ def test_missing_table_reads_as_empty_and_appears_later(tmp_path):
     assert empty.num_rows == 0 and empty.schema == contract.SCHEMAS[ITEMS]
     assert lake.data_reads == []  # nothing to read
     assert lake.read(ITEMS).num_rows == 0
-    assert lake.history(ITEMS) == []
 
     fx.write_small_lake(tmp_path, [ITEMS])
     assert reader.get(ITEMS).num_rows == 3

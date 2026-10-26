@@ -165,19 +165,6 @@ SCHEMAS: dict[str, pa.Schema] = {
     ),
 }
 
-# Gold tables offered on the time-travel page, with the measures compared there.
-TIME_TRAVEL_MEASURES: dict[str, tuple[str, ...]] = {
-    "gold/fact_order_items": ("price", "freight_value"),
-    "gold/fact_orders_lifecycle": ("items_value", "payment_value"),
-    "gold/revenue_events": ("amount",),
-    "gold/agg_revenue_hourly": ("revenue", "sales", "corrections"),
-    "gold/agg_status_funnel": ("transitions",),
-    "gold/status_transitions": (),
-    "gold/dim_customer": (),
-    "gold/dim_product": (),
-    "gold/dim_geography": (),
-}
-
 
 def empty(table: str) -> pa.Table:
     return SCHEMAS[table].empty_table()
