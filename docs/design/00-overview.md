@@ -36,7 +36,7 @@ Szczegóły każdego komponentu znajdują się w osobnym dokumencie. Tutaj są t
 | 4 | [Kafka + Schema Registry](04-kafka.md) | KRaft single node, dwa listenery, consumer AVRO z walidacją | projekt tematów jako kod (wszystkie tematy tabel kompaktowane jako lustra); kolejność per wiersz; zgodność BACKWARD; consumer: statystyki, reguły, śledzenie zamówienia; acks=all + idempotencja + zstd |
 | 5 | [Spark](05-spark.md) | odczyt z Kafki, deserializacja AVRO, transformacja | dekodowanie per `schema_id` (ewolucja); **bronze** (exactly-once, `txnAppId`) → **silver** (MERGE ze strażnikiem LSN, miękkie usuwanie, PK ze schematu klucza) → **gold** (gwiazda, fakt z akumulującym snapshotem, SCD2, okna z watermarkiem, lejek i korekty); kwarantanna; metryki i opóźnienie e2e |
 | 6 | [MinIO + Delta](06-minio-delta.md) | zapis w formacie Delta, dokumentacja odczytu | kubełek per warstwa + konta per usługa (idempotentny `minio-init`); audyt, time travel, RESTORE; CDF na silver; CHECK; OPTIMIZE/Z-ORDER/VACUUM z pomiarem; checkpointy w MinIO (bezstanowy Spark); odczyt przez DuckDB i delta-rs |
-| 7 | [Dashboard (Streamlit)](07-dashboard.md) | odczyt gold, wykresy, odświeżanie | 8 stron (biznes, mapa, lejek, logistyka, klienci SCD2, zdrowie potoku); tylko Delta przez delta-rs/DuckDB; odczyt tylko po zmianie wersji tabeli; Grafana rozważona i odrzucona (brak źródła Delta) |
+| 7 | [Dashboard (Streamlit)](07-dashboard.md) | odczyt gold, wykresy, odświeżanie | 9 stron (biznes, mapa, lejek, logistyka, klienci SCD2, płatności i opinie, zdrowie potoku); tylko Delta przez delta-rs/DuckDB; odczyt tylko po zmianie wersji tabeli; Grafana rozważona i odrzucona (brak źródła Delta) |
 | 8 | Operacje i testy | jeden `docker compose up` | healthchecki + `service_healthy`; kontenery startowe; zestaw testów automatycznych (patrz niżej) |
 
 ## Zasada: weryfikacja = testy automatyczne
@@ -70,18 +70,18 @@ Decyzja 2026-10-21: testy e2e (wiersze „e2e” w sekcjach Testy, dziś ⏳) po
 
 Etap 5:
 - testy e2e z awariami i uzgadnianiem Postgres ↔ Delta, w tym zgodność KPI dashboardu z widokami prawdy (`sim.v_truth_*`),
+- e2e: pełny dysk MinIO (zaobserwowane 2026-10-25: `XMinioStorageFull`, zapytania Sparka zatrzymane) i powrót Sparka po zwolnieniu miejsca bez utraty i duplikatów,
+- reguły jakości `price_nonneg`/`freight_nonneg` przepuszczają NULL, który potem łamie CHECK w gold i zatrzymuje całą paczkę (w danych Olist brak takich wierszy; wykryte przy `fact_reviews`, 2026-10-27),
 - jedna pełna weryfikacja `qa-engineer` etapów 3–5,
 - dokumentacja wdrożenia.
 
 Otwarte poprawki do domknięcia po drodze (szczegóły w [08-operations.md](08-operations.md) §14):
-- wolny test consumera (`test_consumer.py::test_consumer_stats_mode…`), przez który szybki `make test-integration` trwa ok. 11 min zamiast ok. 2 min,
-- restart Connect po długim postoju: zapisany offset starszy niż `restart_lsn` slotu, zadanie `FAILED` (dziś obejście `make reset`),
-- limit czasu joba `integration` w CI (`timeout-minutes: 40` na granicy),
-- usunięcie nieużywanego profilu compose `pipeline` (CI i `test_compose_config_valid` nadal go podają).
-- testy integracyjne zostawiają ślad w danych biznesowych: zamówienia `test-stage2-bad-o-…` z testu kwarantanny są usunięte z Postgresa, ale ich przejścia statusów zostały w historii gold (`status_transitions`, `agg_status_funnel`; 5 × `(new) → delivered` i 5 × `delivered → created` na lejku). Testy nie powinny pisać do głównych tabel żywego stosu, a stos do oddania stawiamy od zera (`make reset`).
+- ~~wolny test consumera (`test_consumer.py::test_consumer_stats_mode…`)~~ **rozwiązane (2026-10-26):** test kończy się też na końcu partycji (`--until-end`), więc nie czeka na ruch symulatora,
+- ~~restart Connect po długim postoju: zapisany offset starszy niż `restart_lsn` slotu, zadanie `FAILED`~~ **rozwiązane (2026-10-26):** `offset.mismatch.strategy=trust_greater_lsn` (03 §13), test `test_debezium.py::test_slot_ahead_of_the_stored_offset_resumes_from_the_slot_without_loss_or_duplicates`,
+- ~~testy integracyjne zostawiają ślad w danych biznesowych~~ **rozwiązane (2026-10-26):** sondy piszą do kopii tabel `shop.zz_probe_<hex>_<tabela>` (fixture `probe_shop`, 03 §11), które nie trafiają do gold. Ślad z wcześniejszych uruchomień (5 × `(new) → delivered`, 5 × `delivered → created` na lejku) zostaje w historii gold istniejącego stosu; stos do oddania stawiamy od zera (`make reset`).
 
 Pomysły na rozszerzenie dashboardu (do decyzji, 2026-10-26):
-- strona „Płatności i opinie”: udział typów płatności (liczba i wartość), rozkład liczby rat, rozkład ocen 1–5, średnia ocena tygodniowo i ocena przy dostawie w terminie vs po terminie. Dane są w silver (`order_payments.payment_type`, `payment_installments`; `order_reviews.review_score`), ale gold ma tylko sumę płatności na zamówienie, a opinii wcale. Potrzebne: dwie tabele gold w Sparku (płatności z typem i ratami; opinie połączone z `fact_orders_lifecycle`), nowa strona, testy i widoki prawdy (`sim.v_truth_payments` już jest, dla opinii trzeba dodać).
+- strona „Płatności i opinie”: udział typów płatności (liczba i wartość), rozkład liczby rat, rozkład ocen 1–5, średnia ocena tygodniowo i ocena przy dostawie w terminie vs po terminie. Dane są w silver (`order_payments.payment_type`, `payment_installments`; `order_reviews.review_score`), ale gold ma tylko sumę płatności na zamówienie, a opinii wcale. Gotowe (2026-10-27): widoki prawdy `sim.v_truth_reviews`, `v_truth_reviews_by_delivery`, `v_truth_payment_installments` ([02-postgresql.md](02-postgresql.md) §8) i tabele `gold/fact_payments`, `gold/fact_reviews` z backfillem i uzgodnieniem z widokami prawdy ([05-spark.md](05-spark.md) §5, §12). **Zrobione (2026-10-27):** strona „Płatności i opinie” w grupie „Biznes” z testami jednostkowymi i integracyjnym uzgodnieniem z widokami prawdy ([07-dashboard.md](07-dashboard.md) §2, §7).
 
 ## Otwarte kwestie
 
