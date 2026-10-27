@@ -305,6 +305,32 @@ def test_truth_views_exact_on_known_data(stack, settings, root):
         assert payments == exp["v_truth_payments"], payments
         (lifecycle,) = rows("v_truth_order_lifecycle")
         assert tuple(int(v) for v in lifecycle) == exp["v_truth_order_lifecycle"], lifecycle
+        reviews = {int(r[0]): (int(r[1]), int(r[2])) for r in rows("v_truth_reviews")}
+        assert reviews == exp["v_truth_reviews"], reviews
+        by_delivery = {r[0] == "t": (int(r[1]), r[2]) for r in rows("v_truth_reviews_by_delivery")}
+        assert by_delivery == exp["v_truth_reviews_by_delivery"], by_delivery
+        installments = {int(r[0]): (int(r[1]), r[2]) for r in rows("v_truth_payment_installments")}
+        assert installments == exp["v_truth_payment_installments"], installments
+
+
+# the review/installment views (dashboard page "payments and reviews") recomputed
+# straight from shop.* with an independent formulation: rounding to the view's types
+TRUTH_DIRECT_QUERIES = {
+    "v_truth_reviews": (
+        "SELECT review_score, count(*), count(DISTINCT order_id) "
+        "FROM shop.order_reviews GROUP BY review_score"
+    ),
+    "v_truth_reviews_by_delivery": (
+        "SELECT CASE WHEN o.order_delivered_customer_date > o.order_estimated_delivery_date "
+        "THEN false ELSE true END, count(*), round(avg(r.review_score), 2) "
+        "FROM shop.orders o JOIN shop.order_reviews r ON r.order_id = o.order_id "
+        "WHERE o.order_delivered_customer_date IS NOT NULL GROUP BY 1"
+    ),
+    "v_truth_payment_installments": (
+        "SELECT payment_installments, count(*), round(sum(payment_value), 2) "
+        "FROM shop.order_payments GROUP BY payment_installments"
+    ),
+}
 
 
 def test_truth_views_apply_and_reconcile(pg_reader):
@@ -342,7 +368,26 @@ def test_truth_views_apply_and_reconcile(pg_reader):
         by_state = pg_reader.execute("SELECT orders FROM sim.v_truth_revenue_by_state").fetchall()
         payments = pg_reader.execute("SELECT payments FROM sim.v_truth_payments").fetchall()
         lifecycle = pg_reader.execute("SELECT orders FROM sim.v_truth_order_lifecycle").fetchone()
+        views = {
+            v: sorted(pg_reader.execute(f"SELECT * FROM sim.{v}").fetchall())
+            for v in TRUTH_DIRECT_QUERIES
+        }
+        direct_views = {
+            v: sorted(pg_reader.execute(q).fetchall()) for v, q in TRUTH_DIRECT_QUERIES.items()
+        }
     assert set(pgh.OLIST_FIXTURE_TABLES) <= set(direct), sorted(direct)
+    for v in TRUTH_DIRECT_QUERIES:
+        assert views[v] and views[v] == direct_views[v], (v, views[v], direct_views[v])
+    by_delivery = dict((r[0], r[1]) for r in views["v_truth_reviews_by_delivery"])
+    assert set(by_delivery) <= {True, False}
+    delivered_reviews = pg_reader.execute(
+        "SELECT count(*) FROM shop.order_reviews r JOIN shop.orders o USING (order_id) "
+        "WHERE o.order_delivered_customer_date IS NOT NULL"
+    ).fetchone()[0]
+    assert sum(by_delivery.values()) == delivered_reviews
+    assert sum(r[1] for r in views["v_truth_reviews"]) == totals[4]
+    assert sum(r[1] for r in views["v_truth_payment_installments"]) == totals[3]
+    assert sum(r[2] for r in views["v_truth_payment_installments"]) == totals[7]
     assert counts == direct, (counts, direct)
     assert sum(r[0] for r in by_status) == totals[0] == lifecycle[0] == direct["orders"]
     assert sum(r[1] for r in by_status) == totals[2] == direct["order_items"]

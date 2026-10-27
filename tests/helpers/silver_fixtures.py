@@ -32,6 +32,11 @@ SCHEMAS = {
         "order_id string, payment_sequential int, payment_type string, "
         "payment_installments int, payment_value decimal(10,2)"
     ),
+    "order_reviews": (
+        "review_id string, order_id string, review_score int, review_comment_title string, "
+        "review_comment_message string, review_creation_date timestamp, "
+        "review_answer_timestamp timestamp"
+    ),
     "customers": (
         "customer_id string, customer_unique_id string, customer_zip_code_prefix string, "
         "customer_city string, customer_state string"
@@ -52,6 +57,7 @@ PKS = {
     "orders": ["order_id"],
     "order_items": ["order_id", "order_item_id"],
     "order_payments": ["order_id", "payment_sequential"],
+    "order_reviews": ["review_id", "order_id"],
     "customers": ["customer_id"],
     "products": ["product_id"],
     "sellers": ["seller_id"],

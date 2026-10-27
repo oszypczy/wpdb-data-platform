@@ -66,6 +66,17 @@ PAYMENT_RULES = (
         "payment_type <> 'not_defined'",
     ),
 )
+REVIEW_RULES = (
+    # the CHECK score_range of gold/fact_reviews (06 §6) is the last line of defence;
+    # Delta's CHECK fails on NULL, so here a missing score is a violation too
+    Rule(
+        "review_score_range",
+        "reject",
+        "order_reviews",
+        ("review_id", "order_id"),
+        "coalesce(review_score BETWEEN 1 AND 5, false)",
+    ),
+)
 PRODUCT_EXISTS = Rule(
     "product_exists", "reject", "order_items", ("order_id", "order_item_id"), "product exists"
 )
@@ -125,3 +136,11 @@ def check_orders(orders: DataFrame) -> DataFrame:
 
 def check_payments(payments: DataFrame) -> DataFrame:
     return check(payments, PAYMENT_RULES)
+
+
+def check_reviews(reviews: DataFrame) -> tuple[DataFrame, DataFrame]:
+    """(valid reviews, violations): a score outside 1..5 is kept out of gold."""
+    v = check(reviews, REVIEW_RULES)
+    rule = REVIEW_RULES[0]
+    valid = reviews.filter(F.coalesce(F.expr(rule.ok), F.lit(True)))
+    return valid, v

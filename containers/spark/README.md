@@ -31,7 +31,7 @@ reading the data back). Owner: `streaming-lakehouse`.
 |---|---|---|
 | `kafka_to_bronze` | Kafka `olist\.shop\..*` + `__debezium-heartbeat.olist` | `bronze/<table>`, `ops/cdc_heartbeat` |
 | `silver_<table>` (one per bronze table, started on discovery) | `bronze/<table>` | `silver/<table>` |
-| `silver_to_gold` | CDF of 7 silver tables | gold dims and facts, `gold/revenue_events`, `ops/quarantine` |
+| `silver_to_gold` | CDF of the 8 silver tables in `GOLD_SOURCES` (a changed list clears its checkpoint and backfills gold from a silver snapshot) | gold dims and facts (incl. `fact_payments`, `fact_reviews`), `gold/revenue_events`, `ops/quarantine` |
 | `gold_transitions` | `bronze/orders` | `gold/status_transitions` |
 | `gold_agg_revenue`, `gold_agg_funnel` | `gold/revenue_events`, `gold/status_transitions` | `gold/agg_revenue_hourly`, `gold/agg_status_funnel` |
 

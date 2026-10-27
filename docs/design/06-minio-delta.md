@@ -17,7 +17,8 @@ Podział odpowiedzialności: [05-spark.md](05-spark.md) opisuje, *co* jest liczo
 bronze/        orders/  order_items/  ...  (jedna tabela na temat, także dla tabel dodanych w trakcie)
 silver/        orders/  order_items/  ...  (CDF włączony)
 gold/          dim_date/ dim_geography/ dim_customer/ dim_product/ dim_seller/
-               fact_order_items/ fact_orders_lifecycle/ revenue_events/ status_transitions/
+               fact_order_items/ fact_orders_lifecycle/ fact_payments/ fact_reviews/
+               revenue_events/ status_transitions/
                agg_revenue_hourly/ agg_status_funnel/
 ops/           stream_metrics/ e2e_latency/ cdc_heartbeat/ quarantine/ maintenance_log/
 checkpoints/   kafka_to_bronze/ silver_<tabela>/ silver_to_gold/ gold_transitions/
@@ -72,7 +73,7 @@ RESTORE TABLE gold.dim_customer TO VERSION AS OF 95;
   ```sql
   ALTER TABLE gold.fact_order_items ADD CONSTRAINT price_nonneg CHECK (price >= 0);
   ```
-  Etap 3 (zakładane przy tworzeniu tabel przez `delta_io.ensure_table`): `fact_order_items`: `price_nonneg` (`price >= 0`), `freight_nonneg` (`freight_value >= 0`); `fact_orders_lifecycle`: `items_nonneg`; `dim_customer`: `valid_range` (`valid_from < valid_to`); `agg_revenue_hourly`: `corrections_nonpos` (`corrections <= 0`). Silver przyjmuje nowe kolumny jawnie (`MERGE … withSchemaEvolution()`), gold i ops nie (schemat zamrożony w `lakehouse/tables.py`).
+  Etap 3 (zakładane przy tworzeniu tabel przez `delta_io.ensure_table`): `fact_order_items`: `price_nonneg` (`price >= 0`), `freight_nonneg` (`freight_value >= 0`); `fact_orders_lifecycle`: `items_nonneg`; `fact_reviews`: `score_range` (`review_score BETWEEN 1 AND 5`, od 2026-10-27; `fact_payments` bez CHECK, bo jego reguły jakości mają poziom `warn`); `dim_customer`: `valid_range` (`valid_from < valid_to`); `agg_revenue_hourly`: `corrections_nonpos` (`corrections <= 0`). Silver przyjmuje nowe kolumny jawnie (`MERGE … withSchemaEvolution()`), gold i ops nie (schemat zamrożony w `lakehouse/tables.py`).
 
 ## 7. Rozszerzenie: utrzymanie tabel
 
@@ -94,6 +95,8 @@ Pomiar na stosie (okno domyślne, ok. 1,5 h strumienia, 2026-10-23):
 | `ops/stream_metrics` | OPTIMIZE | 3 → 1 | 119 987 → 110 367 | – |
 | `gold/fact_order_items` (6 tys. wierszy, MERGE co 20 s) | OPTIMIZE ZORDER BY (customer_state, purchase_date) | 1 → 1 | 923 868 → 923 868 | 155 → 123 ms (`sum(price)` dla SP) |
 | `gold/fact_orders_lifecycle` | OPTIMIZE ZORDER BY (customer_state, purchased_at) | 1 → 1 | 963 335 → 963 335 | 122 → 111 ms |
+| `gold/fact_payments` (5,9 tys., 2026-10-27 po backfillu) | OPTIMIZE ZORDER BY (purchased_at, payment_type) | 4 → 1 | 301 715 → 290 932 | – |
+| `gold/fact_reviews` (4,5 tys., 2026-10-27 po backfillu) | OPTIMIZE ZORDER BY (review_created_at, customer_state) | 4 → 1 | 435 537 → 417 110 | – |
 | test `test_optimize_compacts_files_and_keeps_the_data` | OPTIMIZE ZORDER | 8 → 1 | suma kontrolna bez zmian | – |
 | bronze/silver (autoCompact) | VACUUM 720 h / 168 h | 1 → 1 na tabelę | bez zmian (pliki usunięte przez autoCompact są młodsze niż retencja) | – |
 
@@ -124,6 +127,8 @@ Wszystkie tabele są w formacie Delta w MinIO: `s3://<warstwa>/<tabela>` (Spark:
 | `gold/dim_customer` | SCD2 po `customer_unique_id`: `customer_sk`, adres, `version`, `valid_from`, `valid_to` (9999-12-31 = bieżąca), `is_current` | `customer_sk` | CHECK `valid_from < valid_to` |
 | `gold/fact_order_items` | ziarno: pozycja zamówienia; `price`, `freight_value`, status, stan klienta i sprzedawcy, `customer_sk`, `purchased_at`, `purchase_date(_key)` | `(order_id, order_item_id)` | CHECK `price >= 0`, `freight_value >= 0`; Z-ORDER `customer_state, purchase_date` |
 | `gold/fact_orders_lifecycle` | akumulujący snapshot: kamienie milowe, `h_to_approve`, `d_to_ship`, `d_to_deliver`, `is_delivered`, `is_late`, pozycje, płatności | `order_id` | CHECK `items >= 0` |
+| `gold/fact_payments` | ziarno: płatność; `payment_type`, `payment_installments`, `payment_value`, stan klienta, status, `purchased_at`, `purchase_date_key` | `(order_id, payment_sequential)` | Z-ORDER `purchased_at, payment_type` |
+| `gold/fact_reviews` | ziarno: opinia; `review_score`, `has_comment`, `review_created_at`, `review_answered_at`, stan klienta, `purchased_at`, `is_delivered`, `is_late`, `d_to_deliver` (z `fact_orders_lifecycle`) | `(review_id, order_id)` | CHECK `review_score BETWEEN 1 AND 5`; Z-ORDER `review_created_at, customer_state` |
 | `gold/revenue_events` | ruchy przychodu: `sale` (+), `correction` (− po anulacji), `adjustment` | `event_id` | tylko dopisywanie |
 | `gold/status_transitions` | przejścia statusów z par `before → after` | `(order_id, source_lsn)` | |
 | `gold/agg_revenue_hourly` | okna 1 h czasu symulacji × stan: `revenue`, `sales`, `corrections`, `freight`, `items_sold`, `items_canceled` | `(window_start, customer_state)` | watermark; CHECK `corrections <= 0` |

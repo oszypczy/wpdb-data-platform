@@ -24,6 +24,10 @@
 --   sim.v_truth_revenue_by_state (customer_state text, orders bigint, items bigint, revenue numeric(14,2))
 --   sim.v_truth_payments     (payment_type text, payments bigint, value numeric(14,2))
 --   sim.v_truth_order_lifecycle (orders, approved, shipped, delivered, late bigint) single row
+--   sim.v_truth_reviews      (review_score integer, reviews bigint, orders bigint)   per score
+--   sim.v_truth_reviews_by_delivery (on_time boolean, reviews bigint, avg_score numeric(4,2))
+--                                                                            reviews of delivered orders only
+--   sim.v_truth_payment_installments (payment_installments integer, payments bigint, value numeric(14,2))
 -- Rows are not ordered; consumers sort by the key column.
 
 -- Exact row counts of every table in shop, discovered from the catalogue so the
@@ -109,3 +113,35 @@ SELECT count(*)::bigint                                                     AS o
        count(*) FILTER (WHERE order_delivered_customer_date
                               > order_estimated_delivery_date)::bigint      AS late
 FROM shop.orders;
+
+-- Reviews per score: review rows and the distinct orders they belong to (Olist has
+-- orders with more than one review, so the two counts differ).
+CREATE OR REPLACE VIEW sim.v_truth_reviews AS
+SELECT r.review_score::integer                        AS review_score,
+       count(*)::bigint                               AS reviews,
+       count(DISTINCT r.order_id)::bigint             AS orders
+FROM shop.order_reviews r
+GROUP BY r.review_score;
+
+-- Review score against delivery punctuality, delivered orders only. `on_time` is the
+-- negation of gold `fact_orders.is_late` (05 §5: delivered timestamp > estimated
+-- timestamp, both `timestamp`, compared as timestamps, not as dates), i.e. the same
+-- definition as `late` in v_truth_order_lifecycle; a missing estimate counts as on
+-- time, as in Spark's coalesce(..., false).
+CREATE OR REPLACE VIEW sim.v_truth_reviews_by_delivery AS
+SELECT (NOT coalesce(o.order_delivered_customer_date
+                     > o.order_estimated_delivery_date, false))::boolean AS on_time,
+       count(*)::bigint                               AS reviews,
+       avg(r.review_score)::numeric(4, 2)             AS avg_score
+FROM shop.order_reviews r
+JOIN shop.orders o USING (order_id)
+WHERE o.order_delivered_customer_date IS NOT NULL
+GROUP BY 1;
+
+-- Payments per number of installments (credit cards split up to 24 installments).
+CREATE OR REPLACE VIEW sim.v_truth_payment_installments AS
+SELECT p.payment_installments::integer                AS payment_installments,
+       count(*)::bigint                               AS payments,
+       coalesce(sum(p.payment_value), 0)::numeric(14, 2) AS value
+FROM shop.order_payments p
+GROUP BY p.payment_installments;

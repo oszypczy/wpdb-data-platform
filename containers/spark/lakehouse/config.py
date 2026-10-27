@@ -22,6 +22,7 @@ GOLD_SOURCES = (
     "orders",
     "order_items",
     "order_payments",
+    "order_reviews",
     "customers",
     "products",
     "sellers",

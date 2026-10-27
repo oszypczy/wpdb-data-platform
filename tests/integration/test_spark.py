@@ -8,7 +8,7 @@ simulator) and read the result back from Delta without Spark (DuckDB with the re
 from __future__ import annotations
 
 import json
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 import pytest
 
@@ -53,21 +53,27 @@ def _silver_row(lake: Lake, table: str, where: str, params: list) -> dict | None
     return dict(zip(cols, row, strict=True)) if row else None
 
 
-def test_real_debezium_messages_reach_bronze_and_silver_with_types(lake, app, pg_reader):
+def test_real_debezium_messages_reach_bronze_and_silver_with_types(
+    lake, app, pg_reader, probe_shop
+):
     """05 §10: "prawdziwe wiadomości Debezium" → bronze i silver zapisane; kolumny i typy
     poprawne (`decimal`, `timestamp`). A purchase written like the simulator's (one
-    transaction over 4 tables) goes through, then an UPDATE and the DELETE."""
+    transaction over 4 tables) goes through, then an UPDATE and the DELETE. Written into
+    the probe shop (mirrors of the business tables with the same column types), so no
+    status change reaches gold."""
+    shop = probe_shop
+    items_t, orders_t = shop.table("order_items"), shop.table("orders")
     clock = cdc.sim_state(pg_reader)["sim_clock"]
-    order = cdc.probe_purchase(app, "stage3", "created", clock)
+    order = cdc.probe_purchase(app, shop, "stage3", "created", clock)
     try:
         item = wait_until(
-            lambda: _silver_row(lake, "order_items", "order_id = ?", [order.order_id]),
+            lambda: _silver_row(lake, items_t, "order_id = ?", [order.order_id]),
             TIMEOUT,
             every=2,
             desc="probe item in silver",
         )
         pg = pg_reader.execute(
-            "SELECT price, freight_value, shipping_limit_date FROM shop.order_items "
+            f"SELECT price, freight_value, shipping_limit_date FROM shop.{items_t} "
             "WHERE order_id = %s",
             (order.order_id,),
         ).fetchone()
@@ -77,31 +83,32 @@ def test_real_debezium_messages_reach_bronze_and_silver_with_types(lake, app, pg
         assert item["shipping_limit_date"].replace(tzinfo=None) == pg[2]
         assert item["_is_deleted"] is False and item["_op"] == "c" and item["_lsn"] > 0
 
-        schema = {f.name: f.type for f in lake.table("s3://silver/order_items").schema().fields}
+        schema = {f.name: f.type for f in lake.table(f"s3://silver/{items_t}").schema().fields}
         assert str(schema["price"]) == 'PrimitiveType("decimal(10,2)")'
         assert str(schema["shipping_limit_date"]) == 'PrimitiveType("timestamp")'
         assert str(schema["order_item_id"]) == 'PrimitiveType("integer")'
 
         # every table of the transaction is in bronze with the full envelope
-        for t in ("customers", "orders", "order_items", "order_payments"):
-            key = "customer_id" if t == "customers" else "order_id"
-            val = order.customer_id if t == "customers" else order.order_id
+        for role in cdc.PROBE_SHOP_TABLES:
+            key = "customer_id" if role == "customers" else "order_id"
+            val = order.customer_id if role == "customers" else order.order_id
             rows = lake.sql(
                 f"SELECT op, before IS NULL, after.{key}, source_lsn, transaction_id, "
-                f"value_schema_id, kafka_offset FROM delta_scan('s3://bronze/{t}') "
+                f"value_schema_id, kafka_offset FROM delta_scan('s3://bronze/"
+                f"{shop.table(role)}') "
                 f"WHERE after.{key} = ?",
                 [val],
             )
-            assert len(rows) == 1, (t, rows)
+            assert len(rows) == 1, (role, rows)
             op, no_before, _, lsn, tx, sid, _ = rows[0]
             assert (op, no_before) == ("c", True) and lsn > 0 and tx and sid > 0
 
         # UPDATE then DELETE: silver follows, the delete is soft (05 §4)
         approved = clock
-        cdc.probe_set_status(app, order, "approved", order_approved_at=approved)
+        cdc.probe_set_status(app, shop, order, "approved", order_approved_at=approved)
         wait_until(
             lambda: (
-                (_silver_row(lake, "orders", "order_id = ?", [order.order_id]) or {}).get(
+                (_silver_row(lake, orders_t, "order_id = ?", [order.order_id]) or {}).get(
                     "order_status"
                 )
                 == "approved"
@@ -111,14 +118,10 @@ def test_real_debezium_messages_reach_bronze_and_silver_with_types(lake, app, pg
             desc="approved in silver",
         )
     finally:
-        cdc.probe_delete(app, order)
+        cdc.probe_delete(app, shop, order)
     gone = wait_until(
         lambda: (
-            (
-                r := _silver_row(
-                    lake, "order_items", "order_id = ? AND _is_deleted", [order.order_id]
-                )
-            )
+            (r := _silver_row(lake, items_t, "order_id = ? AND _is_deleted", [order.order_id]))
             and r
         ),
         TIMEOUT,
@@ -127,7 +130,7 @@ def test_real_debezium_messages_reach_bronze_and_silver_with_types(lake, app, pg
     )
     assert gone["_op"] == "d" and gone["price"] == Decimal("58.90")  # the before image
     bronze_ops = lake.sql(
-        "SELECT op FROM delta_scan('s3://bronze/orders') WHERE coalesce(after.order_id, "
+        f"SELECT op FROM delta_scan('s3://bronze/{orders_t}') WHERE coalesce(after.order_id, "
         "before.order_id) = ? ORDER BY source_lsn",
         [order.order_id],
     )
@@ -209,19 +212,21 @@ def test_add_column_reaches_silver_without_restart(lake, app, stack, topic_reade
 
 
 @pytest.mark.slow
-def test_restart_from_checkpoint_keeps_bronze_offsets_unique(lake, app, stack, pg_reader):
+def test_restart_from_checkpoint_keeps_bronze_offsets_unique(
+    lake, app, stack, pg_reader, probe_shop
+):
     """05 §10: "restart z checkpointu" → w bronze unikalne `(topic, partition, offset)`.
-    The container is restarted while the simulator keeps writing; a probe written after
-    the restart arrives exactly once; no Kafka record is in bronze twice."""
+    The container is restarted while the simulator keeps writing; a probe (probe shop)
+    written after the restart arrives exactly once; no Kafka record is in bronze twice."""
     stack.run("restart", "spark")
     stack.wait_healthy(timeout=300)
     clock = cdc.sim_state(pg_reader)["sim_clock"]
-    order = cdc.probe_purchase(app, "restart", "created", clock)
+    order = cdc.probe_purchase(app, probe_shop, "restart", "created", clock)
     try:
         wait_until(
             lambda: (
                 lake.scalar(
-                    "SELECT count(*) FROM delta_scan('s3://bronze/orders') "
+                    f"SELECT count(*) FROM delta_scan('s3://bronze/{probe_shop.table('orders')}') "
                     "WHERE after.order_id = ?",
                     [order.order_id],
                 )
@@ -232,10 +237,84 @@ def test_restart_from_checkpoint_keeps_bronze_offsets_unique(lake, app, stack, p
             desc="probe in bronze after restart",
         )
     finally:
-        cdc.probe_delete(app, order)
+        cdc.probe_delete(app, probe_shop, order)
     for t in TABLES:
         total, distinct = lake.sql(
             "SELECT count(*), count(DISTINCT (kafka_topic, kafka_partition, kafka_offset)) "
             f"FROM delta_scan('s3://bronze/{t}')"
         )[0]
         assert total == distinct, (t, total, distinct)
+
+
+GOLD_VS_TRUTH = {
+    # truth view -> the same aggregate over gold (DuckDB), keyed by the first column
+    "v_truth_reviews": (
+        "SELECT review_score, count(*), count(DISTINCT order_id) "
+        "FROM delta_scan('s3://gold/fact_reviews') GROUP BY 1"
+    ),
+    "v_truth_reviews_by_delivery": (
+        "SELECT NOT is_late, count(*), sum(review_score) "
+        "FROM delta_scan('s3://gold/fact_reviews') WHERE is_delivered GROUP BY 1"
+    ),
+    "v_truth_payments": (
+        "SELECT payment_type, count(*), sum(payment_value) "
+        "FROM delta_scan('s3://gold/fact_payments') GROUP BY 1"
+    ),
+    "v_truth_payment_installments": (
+        "SELECT payment_installments, count(*), sum(payment_value) "
+        "FROM delta_scan('s3://gold/fact_payments') GROUP BY 1"
+    ),
+}
+
+
+def _avg2(total: int, n: int) -> Decimal:
+    """avg(...)::numeric(4,2) as Postgres rounds it (half away from zero)."""
+    return (Decimal(total) / Decimal(n)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _gold_aggregates(lake: Lake) -> dict[str, dict]:
+    out = {}
+    for view, sql in GOLD_VS_TRUTH.items():
+        rows = lake.sql(sql)
+        if view == "v_truth_reviews_by_delivery":
+            out[view] = {k: (int(n), _avg2(int(s), int(n))) for k, n, s in rows}
+        else:
+            out[view] = {k: (int(a), b if isinstance(b, Decimal) else int(b)) for k, a, b in rows}
+    return out
+
+
+def _truth_aggregates(pg) -> dict[str, dict]:
+    out = {}
+    for view in GOLD_VS_TRUTH:
+        rows = pg.execute(f"SELECT * FROM sim.{view}").fetchall()
+        out[view] = {k: (int(a), b if isinstance(b, Decimal) else int(b)) for k, a, b in rows}
+    return out
+
+
+def test_payments_and_reviews_in_gold_reconcile_with_the_truth_views(lake, pg_reader):
+    """05 §10: gold/fact_payments and gold/fact_reviews equal the Postgres truth views
+    once Spark has caught up: reviews and distinct orders per score, reviews and average
+    score of delivered orders per on-time flag (is_late of fact_orders_lifecycle), and
+    payments with their value per type and per number of installments. Both sides are
+    re-read every round, so the test also passes while the simulator is still running."""
+    for t in ("fact_payments", "fact_reviews"):
+        assert lake.exists(f"s3://gold/{t}"), t
+    state: dict[str, dict] = {}
+
+    def equal() -> bool:
+        state["truth"] = _truth_aggregates(pg_reader)
+        state["gold"] = _gold_aggregates(lake)
+        return state["gold"] == state["truth"]
+
+    try:
+        wait_until(equal, 300, every=5, desc="gold payments/reviews = sim.v_truth_*")
+    except TimeoutError:
+        diff = {
+            v: (state["gold"][v], state["truth"][v])
+            for v in GOLD_VS_TRUTH
+            if state["gold"].get(v) != state["truth"].get(v)
+        }
+        pytest.fail(f"gold != truth after 300 s (gold, truth): {diff}")
+    truth = state["truth"]
+    assert sum(n for n, _ in truth["v_truth_reviews"].values()) > 0
+    assert sum(n for n, _ in truth["v_truth_payments"].values()) > 0

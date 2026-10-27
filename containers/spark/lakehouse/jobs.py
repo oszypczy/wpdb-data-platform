@@ -8,7 +8,7 @@ query                  source                                       sinks
 kafka_to_bronze        Kafka ``olist.shop.*`` + heartbeat topic     bronze/<table>,
                                                                     ops/cdc_heartbeat
 silver_<table>         bronze/<table> (Delta stream)                silver/<table>
-silver_to_gold         CDF of 7 silver tables                       gold dims + facts,
+silver_to_gold         CDF of the 8 silver tables of GOLD_SOURCES   gold dims + facts,
                                                                     gold/revenue_events,
                                                                     ops/quarantine
 gold_transitions       bronze/orders (Delta stream)                 gold/status_transitions
@@ -319,12 +319,44 @@ def cdf_projection(df: DataFrame, src: str) -> DataFrame:
     )
 
 
+SOURCES_MARKER = "_wpdb_gold_sources"
+
+
+def reset_on_new_sources(spark: SparkSession, checkpoint: str, sources: tuple[str, ...]) -> bool:
+    """A streaming query cannot change its set of sources on an existing checkpoint
+    (the offset log has one entry per source). When ``GOLD_SOURCES`` changes, the gold
+    checkpoint is cleared; the fresh query reads every silver table's CDF from a
+    snapshot (all rows as inserts), so every order is recomputed: the new gold tables
+    are backfilled and the existing ones get an empty diff (no revenue events).
+    Returns True when an existing checkpoint was cleared."""
+    marker = checkpoint.rstrip("/") + "/" + SOURCES_MARKER
+    want = ",".join(sources)
+    have = delta_io.read_text(spark, marker)
+    if have is not None and have.strip() == want:
+        return False
+    started = "offsets" in delta_io.list_dirs(spark, checkpoint)
+    if started:
+        log.warning("gold sources changed (%s -> %s): clearing %s", have, want, checkpoint)
+        delta_io.delete_path(spark, checkpoint)
+    delta_io.write_text(spark, marker, want)
+    return started
+
+
 class GoldJob(Job):
     """Star schema from the silver Change Data Feed (05 §5, §6)."""
 
     gold_layer = True
 
     name = "silver_to_gold"
+
+    def __init__(self, spark: SparkSession, settings: Settings, lake: Lake) -> None:
+        backfill = reset_on_new_sources(spark, lake.checkpoint(self.name), GOLD_SOURCES)
+        # after a reset the first batches replay the whole silver state: their source
+        # timestamps are not end-to-end latency, so only newer changes are measured
+        self.latency_from = (
+            dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) if backfill else None
+        )
+        super().__init__(spark, settings, lake)
 
     def start(self) -> StreamingQuery:
         streams = [
@@ -360,7 +392,7 @@ class GoldJob(Job):
                 .load(lake.silver(t))
                 for t in GOLD_SOURCES
             }
-            for t in ("orders", "order_items", "customers"):
+            for t in ("orders", "order_items", "customers", "order_payments", "order_reviews"):
                 S[t] = S[t].persist()
                 cached.append(S[t])
 
@@ -394,12 +426,24 @@ class GoldJob(Job):
             orders_rows = S["orders"].join(orders_a, "order_id", "left_semi")
             items_rows = gold.alive(S["order_items"].join(orders_a, "order_id", "left_semi"))
             pay_rows = gold.alive(S["order_payments"].join(orders_a, "order_id", "left_semi"))
+            rev_rows = gold.alive(S["order_reviews"].join(orders_a, "order_id", "left_semi"))
             valid_items, v_items = quality.check_items(items_rows, gold.alive(S["products"]))
             valid_items = freeze(valid_items)
             cached.append(valid_items)
-            v = v_items.unionByName(quality.check_orders(gold.alive(orders_rows))).unionByName(
-                quality.check_payments(pay_rows)
+            valid_reviews, v_reviews = quality.check_reviews(rev_rows)
+            v = (
+                v_items.unionByName(quality.check_orders(gold.alive(orders_rows)))
+                .unionByName(quality.check_payments(pay_rows))
+                .unionByName(v_reviews)
             )
+            # the lifecycle rows of the affected orders: their own fact, and the order
+            # attributes of the payment and review facts (one definition of is_late)
+            desired_lc = freeze(
+                gold.fact_orders_lifecycle(
+                    orders_rows, S["customers"], dim_c, valid_items, pay_rows
+                )
+            )
+            cached.append(desired_lc)
             timings["prepare"] = round(time.perf_counter() - t0, 1)
 
             def dim_customer() -> None:
@@ -431,14 +475,31 @@ class GoldJob(Job):
                 delta_io.apply_diff(spark, path, changes, keys)
 
             def lifecycle() -> None:
-                desired_lc = gold.fact_orders_lifecycle(
-                    orders_rows, S["customers"], dim_c, valid_items, pay_rows
-                )
                 delta_io.sync_subset(
                     spark,
                     lake.gold("fact_orders_lifecycle"),
                     desired_lc,
                     ["order_id"],
+                    scope=orders_a,
+                    scope_cols=["order_id"],
+                )
+
+            def payments() -> None:
+                delta_io.sync_subset(
+                    spark,
+                    lake.gold("fact_payments"),
+                    gold.fact_payments(pay_rows, desired_lc),
+                    ["order_id", "payment_sequential"],
+                    scope=orders_a,
+                    scope_cols=["order_id"],
+                )
+
+            def reviews() -> None:
+                delta_io.sync_subset(
+                    spark,
+                    lake.gold("fact_reviews"),
+                    gold.fact_reviews(valid_reviews, desired_lc),
+                    ["review_id", "order_id"],
                     scope=orders_a,
                     scope_cols=["order_id"],
                 )
@@ -450,6 +511,8 @@ class GoldJob(Job):
                 "quarantine": lambda: write_quarantine(spark, lake, v),
                 "fact_order_items+events": items_and_events,
                 "fact_orders_lifecycle": lifecycle,
+                "fact_payments": payments,
+                "fact_reviews": reviews,
             }
             with ThreadPoolExecutor(max_workers=len(work), thread_name_prefix="gold") as pool:
                 futures = [pool.submit(timed, k, fn) for k, fn in work.items()]
@@ -459,6 +522,8 @@ class GoldJob(Job):
 
             measured = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
             live = cdf.filter(F.col("_change_type") != "update_preimage")
+            if self.latency_from is not None:
+                live = live.filter(F.col("_source_ts") >= F.lit(self.latency_from))
             record_latency(latency_rows(live, "gold", "star", batch_id, measured))
         finally:
             for c in cached:

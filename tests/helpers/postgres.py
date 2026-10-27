@@ -82,7 +82,7 @@ CREATE INDEX orders_customer_id_idx ON shop.orders (customer_id);
 CREATE INDEX order_reviews_order_id_idx ON shop.order_reviews (order_id);
 """
 
-# Known data set: 3 customers (SP, SP, RJ), 4 orders, 4 items, 3 payments, 1 review.
+# Known data set: 3 customers (SP, SP, RJ), 4 orders, 4 items, 3 payments, 3 reviews.
 #   delivered o1 (SP): items 58.90 + 21.10 (freight 13.29 + 5.00), approved/shipped/delivered, late
 #   shipped   o2 (SP): item 100.00 (freight 10.00), approved/shipped
 #   canceled  o3 (RJ): items deleted (none), approved
@@ -110,7 +110,9 @@ INSERT INTO shop.order_payments VALUES
   ('o2', 1, 'boleto', 1, 110.00),
   ('o4', 1, 'voucher', 1, 7.00);
 INSERT INTO shop.order_reviews VALUES
-  ('r1', 'o1', 5, NULL, 'muito bom', '2017-10-11 00:00:00', '2017-10-12 10:00:00');
+  ('r1', 'o1', 5, NULL, 'muito bom', '2017-10-11 00:00:00', '2017-10-12 10:00:00'),
+  ('r2', 'o1', 4, NULL, NULL, '2017-10-12 00:00:00', '2017-10-13 10:00:00'),
+  ('r3', 'o2', 3, NULL, 'atrasado', '2017-10-15 00:00:00', NULL);
 """
 
 # what the views must return for OLIST_FIXTURE_DATA (exact; see run-tests skill)
@@ -120,7 +122,7 @@ OLIST_FIXTURE_EXPECTED = {
         "orders": 4,
         "order_items": 4,
         "order_payments": 3,
-        "order_reviews": 1,
+        "order_reviews": 3,
     },
     "v_truth_orders": {
         # order_status: (orders, items, revenue, freight)
@@ -129,7 +131,7 @@ OLIST_FIXTURE_EXPECTED = {
         "canceled": (1, 0, "0.00", "0.00"),
         "created": (1, 1, "5.50", "1.50"),
     },
-    "v_truth_totals": (4, 3, 4, 3, 1, "185.50", "29.79", "215.29"),
+    "v_truth_totals": (4, 3, 4, 3, 3, "185.50", "29.79", "215.29"),
     "v_truth_revenue_by_state": {
         # customer_state: (orders, items, revenue)
         "SP": (2, 3, "180.00"),
@@ -141,6 +143,12 @@ OLIST_FIXTURE_EXPECTED = {
         "voucher": (1, "7.00"),
     },
     "v_truth_order_lifecycle": (4, 3, 2, 1, 1),
+    # review_score: (reviews, orders); o1 has two reviews
+    "v_truth_reviews": {5: (1, 1), 4: (1, 1), 3: (1, 1)},
+    # on_time: (reviews, avg_score); only o1 is delivered, and late (10-10 21:25 > 10-09)
+    "v_truth_reviews_by_delivery": {False: (2, "4.50")},
+    # payment_installments: (payments, value)
+    "v_truth_payment_installments": {3: (1, "98.29"), 1: (2, "117.00")},
 }
 
 TRUTH_VIEW_COLUMNS = {
@@ -159,6 +167,9 @@ TRUTH_VIEW_COLUMNS = {
     "v_truth_revenue_by_state": ["customer_state", "orders", "items", "revenue"],
     "v_truth_payments": ["payment_type", "payments", "value"],
     "v_truth_order_lifecycle": ["orders", "approved", "shipped", "delivered", "late"],
+    "v_truth_reviews": ["review_score", "reviews", "orders"],
+    "v_truth_reviews_by_delivery": ["on_time", "reviews", "avg_score"],
+    "v_truth_payment_installments": ["payment_installments", "payments", "value"],
 }
 
 

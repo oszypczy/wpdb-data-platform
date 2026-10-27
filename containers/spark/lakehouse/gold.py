@@ -293,6 +293,63 @@ def fact_orders_lifecycle(
     )
 
 
+def fact_payments(payments: DataFrame, lifecycle: DataFrame) -> DataFrame:
+    """Grain: one payment ``(order_id, payment_sequential)``; order attributes from the
+    ``fact_orders_lifecycle`` rows (so a payment appears with its order, like items).
+    ``payments`` are the alive silver rows; warn-rule violations stay (05 §6)."""
+    o = lifecycle.select(
+        "order_id", "customer_state", "order_status", "purchased_at", "purchase_date_key"
+    )
+    return (
+        alive(payments)
+        .join(o, "order_id")
+        .select(
+            "order_id",
+            F.col("payment_sequential").cast("int"),
+            "payment_type",
+            F.col("payment_installments").cast("int"),
+            F.col("payment_value").cast(MONEY),
+            "customer_state",
+            "order_status",
+            "purchased_at",
+            "purchase_date_key",
+        )
+    )
+
+
+def _non_empty(c: str) -> Column:
+    return F.coalesce(F.length(F.trim(F.col(c))) > 0, F.lit(False))
+
+
+def fact_reviews(reviews: DataFrame, lifecycle: DataFrame) -> DataFrame:
+    """Grain: one review ``(review_id, order_id)`` (``review_id`` alone repeats in Olist).
+    Delivery attributes (``is_delivered``, ``is_late``, ``d_to_deliver``) are taken from
+    the ``fact_orders_lifecycle`` rows, so their semantics are identical; a review whose
+    order is not in silver yet appears when the order arrives."""
+    o = lifecycle.select(
+        "order_id", "customer_state", "purchased_at", "is_delivered", "is_late", "d_to_deliver"
+    )
+    return (
+        alive(reviews)
+        .join(o, "order_id")
+        .select(
+            "review_id",
+            "order_id",
+            F.col("review_score").cast("int"),
+            (_non_empty("review_comment_title") | _non_empty("review_comment_message")).alias(
+                "has_comment"
+            ),
+            F.col("review_creation_date").alias("review_created_at"),
+            F.col("review_answer_timestamp").alias("review_answered_at"),
+            "customer_state",
+            "purchased_at",
+            "is_delivered",
+            "is_late",
+            "d_to_deliver",
+        )
+    )
+
+
 # -------------------------------------------------------------------------- events
 def revenue_events(changes: DataFrame, clock: dt.datetime | None, batch_id: int) -> DataFrame:
     """Revenue movements from the differences of ``fact_order_items`` (``delta_io.diff``):
@@ -459,9 +516,9 @@ def affected(
     """(order_ids, customer_unique_ids) whose gold rows must be recomputed for a batch of
     silver changes. ``orders``/``items``/``customers`` are the whole silver tables
     (deleted rows included, so deletes propagate)."""
-    direct = cdf.filter(F.col("src").isin("orders", "order_items", "order_payments")).select(
-        "order_id"
-    )
+    direct = cdf.filter(
+        F.col("src").isin("orders", "order_items", "order_payments", "order_reviews")
+    ).select("order_id")
     products = cdf.filter(F.col("src") == "products").select("product_id").distinct()
     via_products = items.join(products, "product_id", "left_semi").select("order_id")
     first = direct.unionByName(via_products).filter(F.col("order_id").isNotNull()).distinct()
