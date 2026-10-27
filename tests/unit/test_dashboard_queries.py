@@ -204,6 +204,12 @@ def test_every_query_on_empty_tables_returns_empty_results(empty_lake):
         "latency_timeseries": q.latency_timeseries(e["ops/e2e_latency"]),
         "latency_summary": q.latency_summary(e["ops/e2e_latency"]),
         "quarantine_by_rule": q.quarantine_by_rule(e["ops/quarantine"]),
+        "payment_types": q.payment_types(e["gold/fact_payments"]),
+        "payment_installments": q.payment_installments(e["gold/fact_payments"]),
+        "score_distribution": q.score_distribution(e["gold/fact_reviews"]),
+        "weekly_scores": q.weekly_scores(e["gold/fact_reviews"]),
+        "reviews_by_delivery": q.reviews_by_delivery(e["gold/fact_reviews"]),
+        "score_shares_by_delivery": q.score_shares_by_delivery(e["gold/fact_reviews"]),
     }  # fmt: skip
     for name, df in frames.items():
         assert df.empty and len(df.columns) > 0, name
@@ -214,6 +220,10 @@ def test_every_query_on_empty_tables_returns_empty_results(empty_lake):
         "customers"] == 0  # fmt: skip
     fresh = q.cdc_freshness(e["ops/cdc_heartbeat"], datetime(2026, 1, 1)).iloc[0]
     assert fresh["heartbeats"] == 0 and fresh["freshness_s"] is None
+    pr = q.payments_reviews_kpis(e["gold/fact_payments"], e["gold/fact_reviews"])
+    assert pr.is_empty and pr.payment_value == Decimal("0.00")
+    assert (pr.avg_score, pr.five_star_pct, pr.comment_pct, pr.credit_card_value_pct,
+            pr.avg_credit_card_installments) == (None,) * 5  # fmt: skip
 
 
 def test_widget_values_are_quoted_in_sql(lake):
@@ -222,3 +232,65 @@ def test_widget_values_are_quoted_in_sql(lake):
     assert df.empty
     with pytest.raises(ValueError):
         q.revenue_timeseries(lake["gold/agg_revenue_hourly"], "minute; DROP")
+
+
+# ------------------------------------------------------------ payments and reviews
+def test_payments_reviews_kpis_on_small_delta_tables(lake):
+    """07 §2 "Płatności i opinie": average score, 5-star share, comment share, average
+    credit-card installments, credit card's share of the value (exact BRL)."""
+    k = q.payments_reviews_kpis(lake["gold/fact_payments"], lake["gold/fact_reviews"])
+    for name, expected in fx.EXPECTED_PAYMENTS_REVIEWS.items():
+        assert getattr(k, name) == expected, name
+    assert k.credit_card_value_pct == pytest.approx(100 * 144 / 262)
+    assert isinstance(k.payment_value, Decimal) and not k.is_empty
+
+    sp = q.payments_reviews_kpis(lake["gold/fact_payments"], lake["gold/fact_reviews"], ("SP",))
+    assert (sp.payments, sp.payment_value, sp.reviews) == (3, Decimal("209.00"), 3)
+    assert sp.avg_score == pytest.approx(10 / 3) and sp.avg_credit_card_installments == 2.0
+
+
+def test_payment_types_and_installments(lake):
+    p = lake["gold/fact_payments"]
+    types = q.payment_types(p)
+    assert types[["payment_type", "payments", "value"]].values.tolist() == [
+        ["credit_card", 2, 144.0], ["voucher", 1, 65.0], ["boleto", 1, 33.0],
+        ["debit_card", 1, 20.0]]  # fmt: skip
+    assert types["payments_pct"].tolist() == [40.0, 20.0, 20.0, 20.0]
+    assert types["value_pct"].sum() == pytest.approx(100.0)
+    inst = q.payment_installments(p)
+    assert inst.values.tolist() == [[1, 4, 162.0], [3, 1, 100.0]]
+    assert q.payment_installments(p, ("RJ",)).values.tolist() == [[1, 1, 33.0]]
+    assert q.payment_types(p, ("SP' OR '1'='1",)).empty
+
+
+def test_score_distribution_and_weekly_average(lake):
+    r = lake["gold/fact_reviews"]
+    dist = q.score_distribution(r)
+    assert dist[["review_score", "reviews", "orders"]].values.tolist() == [
+        [1, 1, 1], [2, 1, 1], [3, 0, 0], [4, 1, 1], [5, 1, 1]]  # fmt: skip
+    assert dist["share_pct"].tolist() == [25.0, 25.0, 0.0, 25.0, 25.0]
+    assert q.score_distribution(r, ("AC",)).empty  # a state without reviews
+
+    weekly = q.weekly_scores(r)
+    assert weekly["week"].tolist() == [
+        pd.Timestamp(d) for d in ("2017-01-02", "2017-01-09", "2017-01-16", "2017-01-23")
+    ]
+    assert weekly["reviews"].tolist() == [2, 1, 0, 1]
+    assert weekly["avg_score"].tolist()[:2] == [3.0, 2.0] and weekly["avg_score"].iloc[3] == 4.0
+    assert pd.isna(weekly["avg_score"].iloc[2])  # the gap stays a gap
+    assert q.weekly_scores(r, ("RJ",))["reviews"].tolist() == [1]
+
+
+def test_score_on_time_vs_late_delivery(lake):
+    """The key insight: reviews of delivered orders, on time vs late (canceled o3 is
+    out), average per group and the score shares within each group."""
+    r = lake["gold/fact_reviews"]
+    by = q.reviews_by_delivery(r)
+    assert by.values.tolist() == [[True, 2, 9, 4.5], [False, 1, 2, 2.0]]
+    shares = q.score_shares_by_delivery(r)
+    assert shares[shares["reviews"] > 0][["on_time", "review_score", "share_pct"]
+                                         ].values.tolist() == [
+        [True, 4, 50.0], [True, 5, 50.0], [False, 2, 100.0]]  # fmt: skip
+    assert len(shares) == 10 and shares.groupby("on_time")["share_pct"].sum().eq(100).all()
+    assert q.reviews_by_delivery(r, ("SP",))["on_time"].tolist() == [True]
+    assert q.score_shares_by_delivery(r, ("MG",)).empty

@@ -10,6 +10,9 @@ The orders:
 - o3 (person u1, SP, after moving): 1 item 40.00 sold, then canceled: the item is deleted
   (gone from fact_order_items) and a -40.00 correction is recorded.
 - o4 (person u3, MG): approved, no items yet.
+
+Payments and reviews (``fact_payments``, ``fact_reviews``): see the comments at the rows;
+expected page KPIs in ``EXPECTED_PAYMENTS_REVIEWS``.
 """
 
 from __future__ import annotations
@@ -30,6 +33,25 @@ def ts(s: str) -> datetime:
 
 
 D = Decimal
+
+
+def _pay(order, seq, kind, inst, value, state, status, purchased) -> dict[str, Any]:
+    t = ts(purchased)
+    return {
+        "order_id": order, "payment_sequential": seq, "payment_type": kind,
+        "payment_installments": inst, "payment_value": D(value), "customer_state": state,
+        "order_status": status, "purchased_at": t, "purchase_date_key": int(t.strftime("%Y%m%d")),
+    }  # fmt: skip
+
+
+def _review(rid, order, score, comment, created, state, delivered, late, days) -> dict[str, Any]:
+    return {
+        "review_id": rid, "order_id": order, "review_score": score, "has_comment": comment,
+        "review_created_at": ts(created), "review_answered_at": ts(created),
+        "customer_state": state, "purchased_at": None, "is_delivered": delivered,
+        "is_late": late, "d_to_deliver": days,
+    }  # fmt: skip
+
 
 ROWS: dict[str, list[dict[str, Any]]] = {
     "gold/dim_geography": [
@@ -418,6 +440,23 @@ ROWS: dict[str, list[dict[str, Any]]] = {
             "transitions": 1,
         },
     ],  # fmt: skip
+    # o1 paid by credit card in 3 installments plus a voucher; o3 (canceled) keeps its
+    # payment like in Olist
+    "gold/fact_payments": [
+        _pay("o1", 1, "credit_card", 3, "100.00", "SP", "delivered", "2017-01-01 10:00:00"),
+        _pay("o1", 2, "voucher", 1, "65.00", "SP", "delivered", "2017-01-01 10:00:00"),
+        _pay("o2", 1, "boleto", 1, "33.00", "RJ", "delivered", "2017-01-02 12:00:00"),
+        _pay("o3", 1, "credit_card", 1, "44.00", "SP", "canceled", "2017-01-03 09:00:00"),
+        _pay("o4", 1, "debit_card", 1, "20.00", "MG", "approved", "2017-01-04 08:00:00"),
+    ],
+    # o1 (on time) has two reviews (5 and 4), o2 (late) a 2, o3 (canceled, never
+    # delivered) a 1; the week of 2017-01-16 has no review (a gap in the weekly series)
+    "gold/fact_reviews": [
+        _review("r1", "o1", 5, True, "2017-01-06 00:00:00", "SP", True, False, 4.0),
+        _review("r2", "o2", 2, True, "2017-01-11 00:00:00", "RJ", True, True, 8.0),
+        _review("r3", "o3", 1, False, "2017-01-04 00:00:00", "SP", False, False, None),
+        _review("r4", "o1", 4, False, "2017-01-25 00:00:00", "SP", True, False, 4.0),
+    ],
     "ops/cdc_heartbeat": [
         {
             "server_name": "olist",
@@ -549,6 +588,18 @@ EXPECTED = {
     "late_pct": 50.0,
     "median_delivery_days": 6.0,
     "sim_clock": datetime(2017, 1, 10, 12, 0),
+}
+
+EXPECTED_PAYMENTS_REVIEWS = {
+    "payments": 5,
+    "payment_value": D("262.00"),
+    "credit_card_value": D("144.00"),
+    "credit_card_payments": 2,
+    "avg_credit_card_installments": 2.0,
+    "reviews": 4,
+    "avg_score": 3.0,
+    "five_star_pct": 25.0,
+    "comment_pct": 50.0,
 }
 
 

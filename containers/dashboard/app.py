@@ -19,6 +19,7 @@ PAGES = {
         st.Page("views/logistics.py", title="Logistyka"),
         st.Page("views/products.py", title="Produkty"),
         st.Page("views/customers.py", title="Klienci"),
+        st.Page("views/payments_reviews.py", title="Płatności i opinie"),
     ],
     "Platforma": [
         st.Page("views/pipeline.py", title="Zdrowie potoku"),

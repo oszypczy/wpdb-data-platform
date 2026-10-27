@@ -60,3 +60,29 @@ def test_page_waits_for_data_on_an_empty_lake(page, tmp_path, monkeypatch):
     at = render(page)
     assert problems(at) == []
     assert "Czekam na dane" in texts(at), page
+
+
+def test_payments_reviews_shows_the_kpis_and_the_delivery_comparison(small_lake, monkeypatch):
+    """07 §2 "Płatności i opinie" on the fixtures: KPI tiles, the on time vs late
+    averages (late lower, red delta), and the state filter recomputes the tiles."""
+    monkeypatch.setenv("DASHBOARD_LAKE_ROOT", str(small_lake))
+    at = render("payments_reviews")
+    assert problems(at) == []
+    metrics = {m.label: m.value for m in at.metric}
+    assert metrics == {
+        "Średnia ocena": "3,00",
+        "Oceny 5": "25,0 %",
+        "Opinie z komentarzem": "50,0 %",
+        "Średnia liczba rat": "2,0",
+        "Karta kredytowa": "55,0 %",
+        "Średnia ocena: w terminie": "4,50",
+        "Średnia ocena: po terminie": "2,00",
+    }
+    late = next(m for m in at.metric if m.label == "Średnia ocena: po terminie")
+    assert late.delta == "-2,50 vs w terminie"
+    assert len(at.get("plotly_chart")) == 6
+    at.multiselect[0].set_value(["RJ"]).run()
+    assert problems(at) == []
+    metrics = {m.label: m.value for m in at.metric}
+    assert (metrics["Średnia ocena"], metrics["Karta kredytowa"]) == ("2,00", "0,0 %")
+    assert metrics["Średnia liczba rat"] == "–"  # no credit card payment in RJ

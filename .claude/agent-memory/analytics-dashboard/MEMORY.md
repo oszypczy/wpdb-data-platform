@@ -1,0 +1,1 @@
+- [Dashboard style preferences](feedback_dashboard_style.md) — no emoji/captions, USD at display only, Polish labels, compact pages, charts.py colours

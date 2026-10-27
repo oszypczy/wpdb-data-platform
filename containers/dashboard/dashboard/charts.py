@@ -43,6 +43,10 @@ SEQUENTIAL = [
 ]
 # ordinal steps for funnel stages: the lightest still clears 2:1 on both surfaces
 ORDINAL = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab"]
+# review scores 1..5 (worse -> better = lighter -> darker): the funnel steps plus one
+# darker step; validated as an ordinal ramp (monotone, adjacent dL >= 0.06, end steps
+# >= 2:1) on Streamlit's light (#ffffff) and dark (#0e1117) backgrounds
+SCORE = [*ORDINAL, "#164b8f"]
 STATUS = {"good": "#0ca30c", "warning": "#fab219", "serious": "#ec835a", "critical": "#d03b3b"}
 
 GEOJSON_PATH = Path(__file__).resolve().parent.parent / "assets" / "brazil-states.geojson"
@@ -102,12 +106,16 @@ def lines(
     y_title: str,
     height: int = 360,
     order: list[str] | None = None,
+    hover: dict[str, Any] | None = None,
+    labels: dict[str, str] | None = None,
 ) -> go.Figure:
     fig = px.line(
         df,
         x=x,
         y=y,
         color=color,
+        hover_data=hover,
+        labels=labels,
         color_discrete_sequence=SERIES,
         category_orders=_order(df, color, order) if color else None,
         render_mode="svg",  # no WebGL dependency in the browser
@@ -126,8 +134,18 @@ def bars(
     height: int = 360,
     barmode: str = "group",
     order: list[str] | None = None,
+    colors: list[str] | None = None,
+    hover: dict[str, Any] | None = None,
+    labels: dict[str, str] | None = None,
 ) -> go.Figure:
-    kwargs: dict[str, Any] = {"color_discrete_sequence": SERIES, "barmode": barmode}
+    """Bars; ``colors`` replaces the categorical slots (e.g. SCORE for an ordinal
+    scale), ``hover``/``labels`` are Plotly Express ``hover_data``/``labels``."""
+    kwargs: dict[str, Any] = {
+        "color_discrete_sequence": colors or SERIES,
+        "barmode": barmode,
+        "hover_data": hover,
+        "labels": labels,
+    }
     if color:
         kwargs["color"] = color
         kwargs["category_orders"] = _order(df, color, order)

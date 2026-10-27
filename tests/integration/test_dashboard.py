@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import uuid
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 import duckdb
 import pyarrow as pa
@@ -98,6 +98,79 @@ def test_query_layer_on_live_gold_equals_duckdb_delta_scan(gold_ready, settings)
                         timeout=120, every=2, desc="a stable pair of reads")  # fmt: skip
     assert (k.revenue, k.orders, k.late) == (Decimal(ref[0]), ref[1], ref[2])
     assert k.gross_sales + k.corrections == k.revenue
+
+
+def _payments_reviews_of_the_query_layer(reader: VersionedReader) -> dict[str, dict]:
+    """The page's queries on live gold, shaped like the truth views (BRL, before the
+    USD conversion of the view layer)."""
+    pay, rev = "gold/fact_payments", "gold/fact_reviews"
+
+    def money(v: float) -> Decimal:
+        return Decimal(f"{v:.2f}")
+
+    dist = reader.derive("score_distribution", [rev], q.score_distribution, None)
+    by = reader.derive("reviews_by_delivery", [rev], q.reviews_by_delivery, None)
+    types = reader.derive("payment_types", [pay], q.payment_types, None)
+    inst = reader.derive("payment_installments", [pay], q.payment_installments, None)
+    k = reader.derive("payments_reviews_kpis", [pay, rev], q.payments_reviews_kpis, None)
+    return {
+        "v_truth_reviews": {
+            int(s): (int(n), int(o))
+            for s, n, o in dist[["review_score", "reviews", "orders"]].values
+            if n > 0
+        },
+        "v_truth_reviews_by_delivery": {
+            bool(t): (int(n), Decimal(f"{a:.6f}").quantize(Decimal("0.01"), ROUND_HALF_UP))
+            for t, n, a in by[["on_time", "reviews", "avg_score"]].values
+        },
+        "v_truth_payments": {
+            t: (int(n), money(v)) for t, n, v in types[["payment_type", "payments", "value"]].values
+        },
+        "v_truth_payment_installments": {
+            int(i): (int(n), money(v))
+            for i, n, v in inst[["payment_installments", "payments", "value"]].values
+        },
+        "kpis": {"payments": k.payments, "value": k.payment_value, "reviews": k.reviews},
+    }
+
+
+def _payments_reviews_truth(pg) -> dict[str, dict]:
+    out = {}
+    for view in ("v_truth_reviews", "v_truth_reviews_by_delivery", "v_truth_payments",
+                 "v_truth_payment_installments"):  # fmt: skip
+        rows = pg.execute(f"SELECT * FROM sim.{view}").fetchall()
+        out[view] = {k: (int(a), b if isinstance(b, Decimal) else int(b)) for k, a, b in rows}
+    pays = out["v_truth_payments"].values()
+    out["kpis"] = {
+        "payments": sum(n for n, _ in pays),
+        "value": sum((v for _, v in pays), Decimal("0.00")),
+        "reviews": sum(n for n, _ in out["v_truth_reviews"].values()),
+    }
+    return out
+
+
+def test_payments_reviews_queries_on_live_gold_equal_the_truth_views(gold_ready, pg_reader):
+    """07 §7 "Płatności i opinie": the page's queries on live gold (account `dashboard`)
+    equal the Postgres truth views: reviews and distinct orders per score, reviews and
+    average score (rounded like ``numeric(4,2)``) of delivered orders on time vs late,
+    payments and BRL value per type and per number of installments, and the KPI totals.
+    Both sides are re-read every round, so a running simulator only delays equality."""
+    reader = VersionedReader(gold_ready)
+    state: dict[str, dict] = {}
+
+    def equal() -> bool:
+        state["truth"] = _payments_reviews_truth(pg_reader)
+        state["gold"] = _payments_reviews_of_the_query_layer(reader)
+        return state["gold"] == state["truth"]
+
+    try:
+        wait_until(equal, 300, every=5, desc="dashboard payments/reviews = sim.v_truth_*")
+    except TimeoutError:
+        diff = {v: (state["gold"][v], state["truth"][v]) for v in state["truth"]
+                if state["gold"][v] != state["truth"][v]}  # fmt: skip
+        pytest.fail(f"query layer != truth after 300 s (gold, truth): {diff}")
+    assert state["truth"]["kpis"]["reviews"] > 0 and state["truth"]["kpis"]["payments"] > 0
+    assert set(state["truth"]["v_truth_reviews_by_delivery"]) == {True, False}
 
 
 # ------------------------------------------------------------------- permissions

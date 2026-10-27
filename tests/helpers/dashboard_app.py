@@ -15,6 +15,7 @@ PAGES = [
     "logistics",
     "products",
     "customers",
+    "payments_reviews",
     "pipeline",
 ]
 

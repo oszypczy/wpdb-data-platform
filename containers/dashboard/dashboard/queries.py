@@ -24,6 +24,14 @@ KPI definitions (07 §2 "Przegląd"):
 - median delivery = median ``d_to_deliver`` (days purchase -> delivery) of delivered orders.
 - simulation clock = latest business time in the lifecycle (purchase, approval,
   shipment or delivery): the simulator fills each milestone when it happens.
+
+KPI definitions (07 §2 "Płatności i opinie", ``fact_payments`` / ``fact_reviews``):
+- average score = mean ``review_score`` of all reviews; 5-star share and comment share
+  (title or message not blank) = share of review rows.
+- average installments = mean ``payment_installments`` of ``credit_card`` payments.
+- credit card share = credit-card ``payment_value`` / all ``payment_value`` (by value).
+- on time vs late (reviews of delivered orders only) = ``not is_late`` as in
+  ``sim.v_truth_reviews_by_delivery``.
 """
 
 from __future__ import annotations
@@ -451,4 +459,171 @@ def quarantine_by_rule(quarantine: Any) -> pd.DataFrame:
                   max(last_seen_at)::TIMESTAMP AS last_seen
            FROM q GROUP BY ALL ORDER BY rows DESC, rule, source_table""",
         q=quarantine,
+    )
+
+
+# ------------------------------------------------------------ payments and reviews
+REVIEW_SCORES = (1, 2, 3, 4, 5)
+
+
+def _states(states: Iterable[str] | None, *conditions: str) -> str:
+    """``WHERE`` clause: the customer-state filter (if any) and the extra conditions."""
+    conds = [f"customer_state IN {_in_list(states)}"] if states else []
+    conds += conditions
+    return f"WHERE {' AND '.join(conds)}" if conds else ""
+
+
+@dataclass(frozen=True)
+class PaymentsReviewsKpis:
+    payments: int
+    payment_value: Decimal
+    credit_card_value: Decimal
+    credit_card_value_pct: float | None
+    credit_card_payments: int
+    avg_credit_card_installments: float | None
+    reviews: int
+    avg_score: float | None
+    five_star_pct: float | None
+    comment_pct: float | None
+
+    @property
+    def is_empty(self) -> bool:
+        return self.payments == 0 and self.reviews == 0
+
+
+def payments_reviews_kpis(
+    payments: Any, reviews: Any, states: tuple[str, ...] | None = None
+) -> PaymentsReviewsKpis:
+    """KPIs of the "Płatności i opinie" page (07 §2): average score 1..5, share of
+    5-star reviews, share of reviews with a comment (title or message), average number
+    of installments of credit-card payments, credit card's share of the paid value."""
+    where = _states(states)
+    n, value, cc_value, cc_n, cc_inst = _row(
+        f"""SELECT count(*),
+                   coalesce(sum(payment_value), 0)::DECIMAL(18,2),
+                   coalesce(sum(payment_value) FILTER (WHERE payment_type = 'credit_card'), 0)
+                       ::DECIMAL(18,2),
+                   count(*) FILTER (WHERE payment_type = 'credit_card'),
+                   avg(payment_installments) FILTER (WHERE payment_type = 'credit_card')
+            FROM p {where}""",
+        p=payments,
+    )
+    r, avg, five, comments = _row(
+        f"""SELECT count(*), avg(review_score),
+                   count(*) FILTER (WHERE review_score = 5),
+                   count(*) FILTER (WHERE has_comment)
+            FROM r {where}""",
+        r=reviews,
+    )
+    return PaymentsReviewsKpis(
+        payments=int(n),
+        payment_value=value,
+        credit_card_value=cc_value,
+        credit_card_value_pct=float(100 * cc_value / value) if value else None,
+        credit_card_payments=int(cc_n),
+        avg_credit_card_installments=None if cc_inst is None else float(cc_inst),
+        reviews=int(r),
+        avg_score=None if avg is None else float(avg),
+        five_star_pct=(100.0 * five / r) if r else None,
+        comment_pct=(100.0 * comments / r) if r else None,
+    )
+
+
+def payment_types(payments: Any, states: tuple[str, ...] | None = None) -> pd.DataFrame:
+    """Per payment type: payments, value (BRL) and their shares (%), by value desc."""
+    return sql(
+        f"""SELECT payment_type,
+                   count(*)::BIGINT AS payments,
+                   sum(payment_value)::DOUBLE AS value,
+                   100.0 * count(*) / sum(count(*)) OVER () AS payments_pct,
+                   (100.0 * sum(payment_value) / sum(sum(payment_value)) OVER ())::DOUBLE
+                       AS value_pct
+            FROM p {_states(states)}
+            GROUP BY 1 ORDER BY value DESC, payment_type""",
+        p=payments,
+    )
+
+
+def payment_installments(payments: Any, states: tuple[str, ...] | None = None) -> pd.DataFrame:
+    """Payments and their value (BRL) per number of installments (all payment types)."""
+    return sql(
+        f"""SELECT payment_installments,
+                   count(*)::BIGINT AS payments,
+                   sum(payment_value)::DOUBLE AS value
+            FROM p {_states(states)}
+            GROUP BY 1 ORDER BY 1""",
+        p=payments,
+    )
+
+
+def score_distribution(reviews: Any, states: tuple[str, ...] | None = None) -> pd.DataFrame:
+    """Reviews (and distinct orders) per score; all five scores, zeros included.
+    Empty when there are no reviews."""
+    return sql(
+        f"""WITH r AS (SELECT * FROM rv {_states(states)}),
+                 s AS (SELECT unnest({list(REVIEW_SCORES)}) AS review_score)
+            SELECT s.review_score::INTEGER AS review_score,
+                   count(r.review_id)::BIGINT AS reviews,
+                   count(DISTINCT r.order_id)::BIGINT AS orders,
+                   100.0 * count(r.review_id) / (SELECT count(*) FROM r) AS share_pct
+            FROM s LEFT JOIN r USING (review_score)
+            WHERE (SELECT count(*) FROM r) > 0
+            GROUP BY 1 ORDER BY 1""",
+        rv=reviews,
+    )
+
+
+def weekly_scores(reviews: Any, states: tuple[str, ...] | None = None) -> pd.DataFrame:
+    """Average score per week of ``review_created_at`` (simulated time) with the number
+    of reviews; weeks without reviews are present with 0 reviews and no average, so a
+    line breaks there instead of bridging the gap."""
+    return sql(
+        f"""WITH a AS (
+                SELECT date_trunc('week', review_created_at::TIMESTAMP) AS week,
+                       count(*) AS reviews, avg(review_score) AS avg_score
+                FROM r {_states(states, "review_created_at IS NOT NULL")}
+                GROUP BY 1),
+            w AS (
+                SELECT unnest(generate_series(min(week), max(week), INTERVAL 1 week)) AS week
+                FROM a)
+            SELECT w.week, coalesce(a.reviews, 0)::BIGINT AS reviews,
+                   a.avg_score::DOUBLE AS avg_score
+            FROM w LEFT JOIN a USING (week) ORDER BY w.week""",
+        r=reviews,
+    )
+
+
+def reviews_by_delivery(reviews: Any, states: tuple[str, ...] | None = None) -> pd.DataFrame:
+    """Reviews of delivered orders, on time (``not is_late``) vs late: reviews, sum and
+    average of the scores (= ``sim.v_truth_reviews_by_delivery``); on time first."""
+    where = _states(states, "is_delivered")
+    return sql(
+        f"""SELECT NOT coalesce(is_late, false) AS on_time,
+                   count(*)::BIGINT AS reviews,
+                   sum(review_score)::BIGINT AS score_sum,
+                   avg(review_score)::DOUBLE AS avg_score
+            FROM r {where}
+            GROUP BY 1 ORDER BY 1 DESC""",
+        r=reviews,
+    )
+
+
+def score_shares_by_delivery(reviews: Any, states: tuple[str, ...] | None = None) -> pd.DataFrame:
+    """Score distribution per delivery group (delivered orders): for each of on time /
+    late with any review, all five scores with their count and share of the group (%),
+    so groups of different size compare."""
+    where = _states(states, "is_delivered")
+    return sql(
+        f"""WITH r AS (SELECT NOT coalesce(is_late, false) AS on_time, review_score
+                       FROM rv {where}),
+                 g AS (SELECT on_time, count(*) AS total FROM r GROUP BY 1),
+                 s AS (SELECT unnest({list(REVIEW_SCORES)}) AS review_score)
+            SELECT g.on_time, s.review_score::INTEGER AS review_score,
+                   count(r.review_score)::BIGINT AS reviews,
+                   100.0 * count(r.review_score) / g.total AS share_pct
+            FROM g CROSS JOIN s
+            LEFT JOIN r ON r.on_time = g.on_time AND r.review_score = s.review_score
+            GROUP BY g.on_time, s.review_score, g.total
+            ORDER BY g.on_time DESC, s.review_score""",
+        rv=reviews,
     )
