@@ -14,8 +14,9 @@ jobs:
   lint-unit:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      # node24 majors (checkout v4 / setup-uv v5 run on the deprecated Node.js 20)
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "0.9.18"
           enable-cache: true
@@ -28,30 +29,38 @@ jobs:
         run: |
           cp .env.example .env
           docker compose config -q
-          docker compose --profile pipeline config -q
+          docker compose --profile tools config -q
 
   integration:
     if: github.event_name == 'workflow_dispatch' && inputs.integration
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # Budget (08 §11): image builds up to ~20 min on a cold runner (MinIO compiled
+    # from source, Spark with its jars, Connect, dashboard, simulator), data ~1 min,
+    # fresh stack <= 3 min, full integration suite incl. slow ~25 min (08 §2.1).
+    # 75 min leaves margin for a slow runner without letting a hung test burn the
+    # 6 h default; the old 40 min was at the edge.
+    timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "0.9.18"
           enable-cache: true
       - run: uv python install
       - run: uv sync --frozen
-      - name: build images (MinIO from source, Connect with the AVRO converter)
+      - name: build every default image (MinIO from source, Connect with the AVRO converter, Spark, dashboard, simulator)
+        # Built here, not by the stack fixture, so the 180 s startup budget test
+        # measures startup only (08 §2: "images already built").
         run: |
           cp .env.example .env
-          docker compose build minio connect
+          docker compose build
       - name: Olist data set (the simulator needs it to become healthy)
         run: make data
-      - name: start the stack
-        run: |
-          docker compose up -d
-          .claude/skills/stack-ops/scripts/wait-healthy.sh 300
+      # Deliberately the FULL suite (incl. `slow`), not the fast subset of
+      # `make test-integration`: this job is the on-demand "clean machine" check, so
+      # it runs what `make test-integration-fresh` runs. The `stack` fixture
+      # (WPDB_FRESH=1) wipes volumes, starts the stack and waits for healthy itself;
+      # a separate `docker compose up` step would only start it twice.
       - name: full integration suite from wiped volumes (incl. slow and the 180 s startup budget test)
         run: make test-integration-fresh
       - name: logs on failure

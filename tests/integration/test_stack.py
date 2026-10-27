@@ -25,17 +25,16 @@ DEFAULT_SERVICES = {
     "minio-init",
     "simulator",  # stage 1: runs by default, healthy once its preload is done
     "spark",  # stage 3: runs by default, healthy once its Kafka -> bronze query is active
+    "dashboard",  # stage 4: runs by default, healthy also with an empty gold
 }
 INIT_SERVICES = ("kafka-init", "minio-init", "connect-init")
 HEALTHY_BUDGET_S = 180
 
 
 def test_compose_config_valid(compose: ComposeStack):
-    """08 §G: `docker compose config` passes by default and with --profile pipeline."""
+    """08 §G: `docker compose config` passes by default and with --profile tools."""
     assert compose.config_ok(), "docker compose config -q failed"
-    assert compose.config_ok(profiles=["pipeline"]), (
-        "docker compose --profile pipeline config -q failed"
-    )
+    assert compose.config_ok(profiles=["tools"]), "docker compose --profile tools config -q failed"
 
 
 def test_all_services_healthy(stack: ComposeStack):
