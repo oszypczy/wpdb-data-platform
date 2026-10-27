@@ -13,6 +13,7 @@ or a numeric string. The rules normalise both.
 
 from __future__ import annotations
 
+import re
 import struct
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
@@ -99,6 +100,20 @@ def as_decimal(value: Any) -> Decimal | None:
 def table_of(topic: str) -> str:
     """`olist.shop.orders` → `orders`."""
     return topic.rsplit(".", 1)[-1]
+
+
+# Probe tables of the integration tests mirror a business table under the name
+# `zz_probe_<hex>_<table>` (tests/helpers/cdc.py::ProbeShop: the tests never write into
+# the business tables of a live stack). They play the role of the table they mirror, so
+# every rule keyed on a table name applies to them unchanged.
+PROBE_TABLE = re.compile(r"^zz_probe_[0-9a-f]+_(?P<role>[a-z_]+)$")
+
+
+def table_role(table: str) -> str:
+    """The business table whose rules apply: `zz_probe_1a2b3c4d_orders` → `orders`;
+    every other name is its own role."""
+    m = PROBE_TABLE.match(table)
+    return m["role"] if m else table
 
 
 def parse_wire_header(data: bytes | None) -> tuple[int, int] | None:
@@ -198,7 +213,7 @@ def check_schema_id_known(
 
 def advance_clock(table: str, event: Mapping[str, Any], clock: datetime | None) -> datetime | None:
     """New clock estimate after this event: the latest event date seen so far (any op)."""
-    columns = EVENT_DATE_COLUMNS.get(table)
+    columns = EVENT_DATE_COLUMNS.get(table_role(table))
     after = event.get("after") or {}
     if not columns or not after:
         return clock
@@ -216,9 +231,11 @@ def validate_event(
     *,
     tolerance: timedelta = DEFAULT_CLOCK_TOLERANCE,
 ) -> list[Violation]:
-    """All business rules for one decoded event; a tombstone (None) has nothing to check."""
+    """All business rules for one decoded event; a tombstone (None) has nothing to check.
+    `table` is the physical table; the rules of its role apply (`table_role`)."""
     if event is None:
         return []
+    table = table_role(table)
     checks = (
         check_before_present(table, event),
         check_status_transition(table, event),

@@ -197,6 +197,10 @@ def test_connector_json_is_pure_json_with_env_secret_and_topic_groups():
     assert cfg["decimal.handling.mode"] == "precise" and cfg["time.precision.mode"] == "connect"
     assert cfg["tombstones.on.delete"] == "true"
     assert cfg["provide.transaction.metadata"] == "true"
+    # resume from max(stored offset, slot) on start; safe because only the connector
+    # advances the slot, to LSNs Kafka acknowledged (03 §13, 08 §14)
+    assert cfg["offset.mismatch.strategy"] == "trust_greater_lsn"
+    assert cfg["lsn.flush.mode"] == "connector"
     assert (
         cfg["heartbeat.interval.ms"] == "10000" and "dbz.heartbeat" in cfg["heartbeat.action.query"]
     )

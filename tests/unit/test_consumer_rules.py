@@ -349,3 +349,52 @@ def test_order_tracker_follows_the_order_and_its_customer():
         "[orders] d e1fe072e was approved",
         "[orders] t e1fe072e tombstone",
     ]
+
+
+# --- probe tables of the integration tests play the role of the table they mirror ----------
+PROBE = "zz_probe_1a2b3c4d"
+
+
+def test_table_role_maps_probe_tables_to_the_business_table():
+    assert rules.table_role(f"{PROBE}_orders") == "orders"
+    assert rules.table_role(f"{PROBE}_order_items") == "order_items"
+    for own in ("orders", "zz_stage2_probe_1a2b3c4d", "zz_probe_orders", "_stage0_probe"):
+        assert rules.table_role(own) == own  # no hex tag: not a probe mirror
+    assert msg(f"olist.shop.{PROBE}_customers", None, None).role == "customers"
+
+
+def test_rules_apply_to_a_probe_table_by_its_role():
+    """The forbidden transition of the integration test's bad probe is caught in the
+    probe orders table exactly as in shop.orders; amounts and dates likewise."""
+    bad = envelope("u", order_row("delivered"), order_row("created"), table=f"{PROBE}_orders")
+    assert [str(v) for v in rules.validate_event(f"{PROBE}_orders", bad, None)] == [
+        "status_transition: orders: delivered → created is not allowed"
+    ]
+    neg = envelope("c", None, item(-1, 1), table=f"{PROBE}_order_items")
+    assert [v.rule for v in rules.validate_event(f"{PROBE}_order_items", neg, None)] == [
+        "amount_non_negative"
+    ]
+    future = order_row("approved", order_approved_at=ms(T0 + timedelta(days=400)))
+    ev = envelope("u", order_row(), future, table=f"{PROBE}_orders")
+    assert [v.rule for v in rules.validate_event(f"{PROBE}_orders", ev, T0)] == [
+        "date_not_in_future"
+    ]
+    assert rules.advance_clock(f"{PROBE}_orders", ev, None) == T0 + timedelta(days=400)
+
+
+def test_order_tracker_and_describe_follow_probe_tables():
+    oid, cid = order_row()["order_id"], order_row()["customer_id"]
+    t = OrderTracker(oid)
+    o, c = f"olist.shop.{PROBE}_orders", f"olist.shop.{PROBE}_customers"
+    cust = msg(c, {"customer_id": cid}, envelope("c", None, {"customer_id": cid}, lsn=10))
+    assert t.record(cust) is False  # pending until the order reveals its customer
+    assert t.record(msg(o, {"order_id": oid}, envelope("c", None, order_row(), lsn=11), 1))
+    assert t.record(
+        msg(o, {"order_id": oid}, envelope("u", order_row(), order_row("approved"), lsn=12), 2)
+    )
+    heads = [line.split(" lsn=")[0] for line in t.timeline()]
+    assert heads == [
+        f"[{PROBE}_customers] c 758b633d",
+        f"[{PROBE}_orders] c e1fe072e created 1483630379000",
+        f"[{PROBE}_orders] u e1fe072e created → approved",
+    ]

@@ -15,6 +15,7 @@ Kafka Connect (Debezium) image and connector registration
 | Setting | Value | Why (design §) |
 |---|---|---|
 | `plugin.name`, `slot.name`, `publication.name`, `publication.autocreate.mode` | `pgoutput`, `debezium_slot`, `dbz_publication`, `disabled` | publication from initdb (02 §3) |
+| `lsn.flush.mode`, `offset.mismatch.strategy` | `connector` (default, explicit), `trust_greater_lsn` | only Debezium advances the slot, and only to LSNs Kafka acknowledged; on start the connector resumes from max(stored offset, slot). Without it a slot one heartbeat ahead of the persisted offset (idle stack: `restart_lsn` = `confirmed_flush_lsn`) failed the task with "...no longer available on the server" (03 §13, 08 §14) |
 | `schema.include.list` / `table.exclude.list` | `shop` / `shop\._.*` | tables named `_…` are test probes, never captured (03 §13) |
 | `snapshot.mode` | `initial` | preload rows as `op=r`, then stream from the slot's consistent point (03 §2) |
 | `decimal.handling.mode`, `time.precision.mode` | `precise`, `connect` | `decimal(10,2)` and `timestamp-millis` logical types (03 §6) |

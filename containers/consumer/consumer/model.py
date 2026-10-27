@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from consumer.rules import table_of
+from consumer.rules import table_of, table_role
 
 TOMBSTONE = "t"  # op label for a null value after DELETE (04 §2)
 ORDER_TABLES = ("orders", "order_items", "order_payments", "order_reviews")
@@ -30,6 +30,11 @@ class Message:
     @property
     def table(self) -> str:
         return table_of(self.topic)
+
+    @property
+    def role(self) -> str:
+        """The business table this one plays (itself, or the one a test probe mirrors)."""
+        return table_role(self.table)
 
     @property
     def op(self) -> str:
@@ -55,7 +60,7 @@ def describe(msg: Message, schema_version: int | None = None) -> str:
         return f"{head} tombstone"
     v = msg.value
     detail = ""
-    if msg.table == "orders":
+    if msg.role == "orders":
         before, after = v.get("before") or {}, v.get("after") or {}
         if msg.op == "u":
             detail = f"{before.get('order_status')} → {after.get('order_status')}"
@@ -63,13 +68,13 @@ def describe(msg: Message, schema_version: int | None = None) -> str:
             detail = f"{after.get('order_status')} {after.get('order_purchase_timestamp')}"
         elif msg.op == "d":
             detail = f"was {before.get('order_status')}"
-    elif msg.table == "order_items":
+    elif msg.role == "order_items":
         row = v.get("after") or v.get("before") or {}
         detail = f"price={row.get('price')} freight={row.get('freight_value')}"
-    elif msg.table == "order_payments":
+    elif msg.role == "order_payments":
         row = v.get("after") or v.get("before") or {}
         detail = f"{row.get('payment_type')} {row.get('payment_value')}"
-    elif msg.table == "order_reviews":
+    elif msg.role == "order_reviews":
         row = v.get("after") or v.get("before") or {}
         detail = f"score={row.get('review_score')}"
     source = v.get("source") or {}
@@ -164,8 +169,8 @@ class OrderTracker:
     def record(self, msg: Message) -> bool:
         """Remember `msg` if it belongs to the order; True when it does."""
         key = msg.key or {}
-        if msg.table in ORDER_TABLES and key.get("order_id") == self.order_id:
-            if msg.table == "orders" and msg.value is not None and self.customer_id is None:
+        if msg.role in ORDER_TABLES and key.get("order_id") == self.order_id:
+            if msg.role == "orders" and msg.value is not None and self.customer_id is None:
                 row = msg.value.get("after") or msg.value.get("before") or {}
                 self.customer_id = row.get("customer_id")
                 if self.customer_id is not None:
@@ -173,7 +178,7 @@ class OrderTracker:
                     self._pending.clear()
             self.seen.append(msg)
             return True
-        if msg.table == "customers":
+        if msg.role == "customers":
             cid = key.get("customer_id")
             if self.customer_id is None:
                 self._pending.setdefault(cid, []).append(msg)

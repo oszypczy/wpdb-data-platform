@@ -27,7 +27,7 @@ CONSUMER_DIR = ROOT / "containers" / "consumer"
 
 
 @pytest.fixture
-def fresh_lifecycle(stack, settings, topic_reader):
+def fresh_lifecycle(stack, settings, topic_reader, probe_shop):
     """A probe lifecycle written right before the consumer runs: the topics are compacted
     mirrors (segment.ms = 1 h), so the per-key history of the session-wide probe may
     already be compacted away when this module runs; fresh records sit in the active
@@ -35,7 +35,7 @@ def fresh_lifecycle(stack, settings, topic_reader):
     app = clients.pg_connect("shop_app", settings["SHOP_APP_PASSWORD"])
     app.autocommit = True
     try:
-        return cdc.run_probe_lifecycle(app, topic_reader)
+        return cdc.run_probe_lifecycle(app, topic_reader, probe_shop)
     finally:
         app.close()
 
@@ -106,19 +106,28 @@ def test_consumer_validate_flags_only_the_bad_probe(consumer_image, stack, fresh
     """04 §6/§8: --validate on the whole stream (every olist.shop.* topic, the default
     --topics, read to the end of each partition) reports zero violations on the simulator's
     data; the deliberately broken probe (delivered → created, 04 §6) is caught by the
-    status-transition rule and nothing else fires."""
+    status-transition rule and nothing else fires. The probe lives in the probe shop's
+    `zz_probe_<hex>_orders`, which the consumer validates with the rules of `orders`
+    (consumer.rules.table_role)."""
     lc = fresh_lifecycle
     lines = run_consumer(stack, "--from-beginning", "--until-end", "--validate", "--json")
     events, summary = parse_json_lines(lines)
     assert summary["events"] > 1000 and summary["decode_errors"] == 0
     assert {topic(t) for t in cdc.SHOP_TABLES} <= set(summary["topics"]), summary["topics"]
+    assert lc.shop.topic("orders") in summary["topics"]
     flagged = [e for e in events if e["violations"]]
     assert flagged, "the bad probe must be flagged"
     for e in flagged:
-        assert e["topic"] == topic("orders") and e["op"] == "u", e
+        # olist.shop.orders itself may still hold bad probes written there by test runs
+        # before the probe shop existed (stacks older than this rule; a fresh stack has none)
+        assert e["topic"].endswith("_orders") or e["topic"] == topic("orders"), e
+        assert e["op"] == "u", e
         assert e["key"]["order_id"].startswith("test-stage2-bad-"), e["key"]
         assert e["violations"] == ["status_transition: orders: delivered → created is not allowed"]
-    assert any(e["key"]["order_id"] == lc.bad.order_id for e in flagged)
+    assert any(
+        e["key"]["order_id"] == lc.bad.order_id and e["topic"] == lc.shop.topic("orders")
+        for e in flagged
+    )
     assert summary["violations"] == len(flagged)
     assert not any(
         e["key"].get("order_id") == lc.clean.order_id and e["violations"] for e in events
@@ -127,10 +136,15 @@ def test_consumer_validate_flags_only_the_bad_probe(consumer_image, stack, fresh
 
 def test_consumer_stats_mode_reports_rates_ops_lag_and_schemas(consumer_image, stack):
     """04 §6: --stats prints, per interval and topic, events/s, the c/u/d/r/t split, the
-    consumer lag and the schema ids seen."""
+    consumer lag and the schema ids seen.
+
+    Bounded by --until-end as well as --max-messages: with only --max-messages and
+    --idle-timeout the run waited for 2000 messages or 5 s of silence, and on a fresh
+    stack (short preload, replay writing every few seconds) neither came for minutes."""
     lines = run_consumer(
         stack,
         "--from-beginning",
+        "--until-end",
         "--stats",
         "--stats-interval",
         "1",
@@ -158,7 +172,8 @@ def test_consumer_stats_mode_reports_rates_ops_lag_and_schemas(consumer_image, s
 
 def test_follow_order_prints_the_lifecycle_across_topics(consumer_image, stack, fresh_lifecycle):
     """04 §6: --follow-order <order_id> collects the order's events from every topic
-    (customer, order, items, payment, status updates, deletion) in LSN order."""
+    (customer, order, items, payment, status updates, deletion) in LSN order; the probe
+    shop's tables are followed by the role of the table they mirror."""
     lc = fresh_lifecycle
     lines = run_consumer(
         stack, "--from-beginning", "--until-end", "--follow-order", lc.clean.order_id
@@ -167,20 +182,22 @@ def test_follow_order_prints_the_lifecycle_across_topics(consumer_image, stack, 
     timeline = [line for line in lines[start + 1 :] if line.startswith("[")]
     heads = [line.split(" lsn=")[0] for line in timeline]
     short, cust = lc.clean.order_id[:8], lc.clean.customer_id[:8]
+    # lines name the physical table; the probe tables mirror the business ones
+    c, o, i, p = (lc.shop.table(t) for t in cdc.PROBE_SHOP_TABLES)
     assert heads == [
-        f"[customers] c {cust}",
-        f"[orders] c {short} created {lc.clean.purchase_ts.isoformat(sep=' ')}+00:00",
-        f"[order_items] c {short}/1 price=58.90 freight=13.29",
-        f"[order_payments] c {short}/1 credit_card 72.19",
-        f"[orders] u {short} created → approved",
-        f"[order_payments] d {short}/1 credit_card 72.19",
-        f"[order_payments] t {short}/1 tombstone",
-        f"[order_items] d {short}/1 price=58.90 freight=13.29",
-        f"[order_items] t {short}/1 tombstone",
-        f"[orders] d {short} was approved",
-        f"[orders] t {short} tombstone",
-        f"[customers] d {cust}",
-        f"[customers] t {cust} tombstone",
+        f"[{c}] c {cust}",
+        f"[{o}] c {short} created {lc.clean.purchase_ts.isoformat(sep=' ')}+00:00",
+        f"[{i}] c {short}/1 price=58.90 freight=13.29",
+        f"[{p}] c {short}/1 credit_card 72.19",
+        f"[{o}] u {short} created → approved",
+        f"[{p}] d {short}/1 credit_card 72.19",
+        f"[{p}] t {short}/1 tombstone",
+        f"[{i}] d {short}/1 price=58.90 freight=13.29",
+        f"[{i}] t {short}/1 tombstone",
+        f"[{o}] d {short} was approved",
+        f"[{o}] t {short} tombstone",
+        f"[{c}] d {cust}",
+        f"[{c}] t {cust} tombstone",
     ]
     assert all(" schema v" in line for line in timeline if not line.endswith("tombstone"))
 

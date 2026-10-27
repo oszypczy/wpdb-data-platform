@@ -79,9 +79,11 @@ def test_password_is_never_exposed_by_the_rest_api(connect, settings):
 
 # --- envelope: c / u / d with full before, keys, transaction metadata ---------------------
 def test_insert_update_delete_give_c_u_d_with_full_before(probe_lifecycle):
-    """03 §11: INSERT, UPDATE, DELETE in shop.orders → c, u, d; u and d carry the full
+    """03 §11: INSERT, UPDATE, DELETE in an orders table → c, u, d; u and d carry the full
     old row (REPLICA IDENTITY FULL), every event has source.lsn, ts_ms and a
-    transaction block; d is followed by a tombstone (04 §2)."""
+    transaction block; d is followed by a tombstone (04 §2). Written into the probe
+    shop's mirror of shop.orders (same columns, PK, replica identity), never into the
+    live business table."""
     lc = probe_lifecycle
     recs = lc.of("orders", lc.clean)
     assert [r.op for r in recs] == ["c", "u", "d", "t"], [r.op for r in recs]
@@ -96,7 +98,7 @@ def test_insert_update_delete_give_c_u_d_with_full_before(probe_lifecycle):
     assert t.value is None and t.key == c.key
     for r in (c, u, d):
         assert r.source["snapshot"] == "false"
-        assert r.source["schema"] == "shop" and r.source["table"] == "orders"
+        assert r.source["schema"] == "shop" and r.source["table"] == lc.shop.table("orders")
         assert isinstance(r.source["lsn"], int) and r.source["lsn"] > 0
         assert isinstance(r.value["ts_ms"], int)
         assert r.value["transaction"]["id"].startswith(f"{r.source['txId']}:")
@@ -131,12 +133,7 @@ def test_purchase_transaction_metadata(probe_lifecycle):
     assert begin.value["event_count"] is None and begin.value["data_collections"] is None
     assert end.value["event_count"] == 4
     collections = {d["data_collection"]: d["event_count"] for d in end.value["data_collections"]}
-    assert collections == {
-        "shop.customers": 1,
-        "shop.orders": 1,
-        "shop.order_items": 1,
-        "shop.order_payments": 1,
-    }
+    assert collections == {f"shop.{lc.shop.table(t)}": 1 for t in cdc.PROBE_SHOP_TABLES}
     assert end.key == {"id": end.value["id"]}
     assert begin.offset < end.offset and end.value["ts_ms"] >= begin.value["ts_ms"]
     # the whole lifecycle of the clean probe is exactly 3 transactions, in order
@@ -398,7 +395,12 @@ def test_add_nullable_column_gives_a_new_schema_version_and_the_connector_stays_
     01 §7 stands in for the simulator's synthetic event) → the next change of the table is
     written with a new AVRO schema that has the nullable field, registered as a new version
     of olist.shop.orders-value (BACKWARD passes), connector RUNNING. The column is dropped
-    again and the writer schema returns to the previous one."""
+    again and the writer schema returns to the previous one.
+
+    One of the few tests that touch a business table (the claim is about the subject of
+    olist.shop.orders): DDL plus no-op UPDATEs of one existing order only (same values,
+    the new column stays NULL), so no row, value or status transition is added to the
+    data Spark turns into gold (no-op updates are not transitions, 05 §5)."""
     subject = f"{topic('orders')}-value"
     pg_app.execute(f"ALTER TABLE shop.orders DROP COLUMN IF EXISTS {EVOLUTION_COLUMN}")
     before_versions = schema_registry.json(f"/subjects/{subject}/versions")
@@ -433,15 +435,16 @@ def test_add_nullable_column_gives_a_new_schema_version_and_the_connector_stays_
     try:
         pg_app.execute(f"ALTER TABLE shop.orders ADD COLUMN {EVOLUTION_COLUMN} text")
         pg_app.execute(
-            f"UPDATE shop.orders SET {EVOLUTION_COLUMN} = 'web' WHERE order_id = %s", (order_id,)
+            "UPDATE shop.orders SET order_status = order_status WHERE order_id = %s", (order_id,)
         )
         recs = topic_reader.read_new(
             start,
-            lambda rs: mine(rs, lambda r: r.after.get(EVOLUTION_COLUMN) == "web") is not None,
+            lambda rs: mine(rs, lambda r: EVOLUTION_COLUMN in r.after) is not None,
             timeout=90,
         )
-        evolved = mine(recs, lambda r: r.after.get(EVOLUTION_COLUMN) == "web")
-        assert evolved.op == "u" and evolved.before.get(EVOLUTION_COLUMN) is None
+        evolved = mine(recs, lambda r: EVOLUTION_COLUMN in r.after)
+        assert evolved.op == "u" and evolved.after[EVOLUTION_COLUMN] is None
+        assert EVOLUTION_COLUMN in evolved.before and evolved.before == evolved.after
         assert evolved.value_schema_id != id_without, "writer schema did not change"
         versions = schema_registry.json(f"/subjects/{subject}/versions")
         new_version = schema_registry.json(f"/schemas/ids/{evolved.value_schema_id}/versions")
@@ -592,6 +595,69 @@ def test_heartbeat_advances_the_slot_while_shop_is_idle(stack, pg_reader, settin
         )
 
 
+# slow: stops the simulator and the connector, waits for a running-xacts record (<= 15 s)
+@pytest.mark.slow
+def test_slot_ahead_of_the_stored_offset_resumes_from_the_slot_without_loss_or_duplicates(
+    stack, connect, pg_reader, pg_debezium, pg_app, captured_probe_table, topic_reader
+):
+    """03 §13, 08 §14: the connector restarts RUNNING when the replication slot is ahead of
+    the offset stored in connect-offsets, as after a long idle period (the slot's
+    restart_lsn follows confirmed_flush_lsn exactly when no transaction is open, and the
+    LSN Debezium flushed may be newer than the last offset Connect persisted).
+
+    The state is recreated deterministically: simulator and connector stopped, heartbeat-
+    only WAL written, the slot advanced over it (checked first: no change of another
+    table in the skipped range), restart_lsn > stored lsn_proc. With the default
+    `offset.mismatch.strategy=no_validation` this fails the task with "...is trying to read
+    change stream starting at ..., but this is no longer available on the server"; with
+    `trust_greater_lsn` the task streams from the slot. A change written while the
+    connector was stopped arrives exactly once and no older record is re-delivered."""
+    assert cdc.connector_config()["offset.mismatch.strategy"] == "trust_greater_lsn"
+    probe = captured_probe_table
+    business = [topic(t) for t in cdc.SHOP_TABLES]
+    stack.run("stop", "simulator")
+    try:
+        quiet_from = cdc.lsn_to_int(cdc.slot_state(pg_reader)["current_lsn"])
+        cdc.wait_committed_past(quiet_from)
+        before = {t: topic_reader.watermarks(t) for t in business + [probe.topic]}
+        cdc.stop_connector(connect)
+        wait_until(lambda: not cdc.slot_state(pg_reader)["active"], 30, desc="slot released")
+        stored = cdc.stored_offset()
+        slot = cdc.advance_slot_past_stored_offset(pg_debezium, int(stored["lsn_proc"]))
+        # the incident's precondition: Debezium's own start-up check would reject this
+        assert cdc.lsn_to_int(slot["restart_lsn"]) > int(stored["lsn_proc"]), (stored, slot)
+        row_id = 700_000 + int(time.time()) % 100_000
+        pg_app.execute(f"INSERT INTO shop.{probe.table} VALUES (%s, 'after-skip')", (row_id,))
+        cdc.resume_connector(connect)
+        cdc.wait_running(connect, timeout=120)
+        recs = topic_reader.read_new(
+            before[probe.topic],
+            lambda rs: any(r.key == {"id": row_id} for r in rs),
+            timeout=90,
+        )
+        mine = [r for r in recs if r.key == {"id": row_id}]
+        assert [r.op for r in mine] == ["c"] and mine[0].after["v"] == "after-skip", mine
+        probe.note(mine[0])
+        assert len(recs) == 1, f"records re-delivered on the probe topic: {recs}"
+        for t in business:  # nothing of the past is streamed again
+            assert topic_reader.watermarks(t).high == before[t].high, t
+        assert cdc.states(cdc.connector_status(connect)) == ("RUNNING", ["RUNNING"])
+        assert "Using offset mismatch strategy 'trust_greater_lsn'" in stack.logs(
+            "connect", tail=2000
+        )
+    finally:
+        if cdc.connector_status(connect)["connector"]["state"] == "STOPPED":
+            cdc.resume_connector(connect)
+        cdc.wait_running(connect, timeout=120)
+        stack.run("up", "-d", "--no-deps", "simulator")
+        wait_until(
+            lambda: next(r for r in stack.ps() if r.service == "simulator").health == "healthy",
+            timeout=180,
+            every=3,
+            desc="simulator healthy again",
+        )
+
+
 # --- latency and lag (measurements for 03/08) -------------------------------------------
 def test_cdc_latency_and_slot_lag_at_defaults(topic_reader, pg_reader):
     """03 §9/§13: end-to-end latency of the stream at default settings, over the last
@@ -648,7 +714,13 @@ def test_snapshot_time_is_recorded_in_source(orders_topic):
 
 
 def test_probe_rows_were_removed(pg_reader, probe_lifecycle):
-    """The probe lifecycle leaves no row behind (truth views unchanged for other tests)."""
+    """The probe lifecycle leaves no row behind: its own tables are empty again, and no
+    probe row is in the business tables (they are never written by the tests)."""
+    for role in cdc.PROBE_SHOP_TABLES:
+        n = pg_reader.execute(
+            f"SELECT count(*) FROM {probe_lifecycle.shop.qualified(role)}"
+        ).fetchone()[0]
+        assert n == 0, (role, n)
     for table, col in (("orders", "order_id"), ("customers", "customer_id")):
         n = pg_reader.execute(
             f"SELECT count(*) FROM shop.{table} WHERE {col} LIKE 'test-stage2-%%'"

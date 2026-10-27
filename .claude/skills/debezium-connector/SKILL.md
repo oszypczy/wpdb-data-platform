@@ -56,6 +56,7 @@ SHOW wal_level; SHOW max_slot_wal_keep_size;
 | schema registered but `is_compatible: false` | incompatible type change; expected for the negative test |
 | task `FAILED`, trace `Schema being registered is incompatible` | a captured table changed a column type; the event waits in the WAL and fails again after every restart. Fix: `PUT localhost:8081/config/<topic>-value` `{"compatibility":"NONE"}` for that subject only, then restart the failed task (03 §5) |
 | task `FAILED`, trace `Compacted topic cannot accept message without key`, log `Primary keys are not defined for table` | a captured table was DROPPED before the connector committed its offset past its last change (03 §13). Fix: exclude the table (`table.exclude.list` already covers `shop._*`) or re-create it with the same PK until the offset passes |
+| task `FAILED`, trace `trying to read change stream starting at … no longer available on the server`, slot `restart_lsn` > stored `lsn_proc` | slot ahead of the persisted offset (idle stack); handled by `offset.mismatch.strategy=trust_greater_lsn` since 2026-10-26 (03 §13). If seen again, check the running config has it (`connect-init` re-PUT) |
 | slot `wal_status=lost` | `max_slot_wal_keep_size` exceeded while Connect was down; manual re-snapshot procedure in 03 §13 |
 
 Snapshot vs stream: rows present before registration arrive with `op=r`; the

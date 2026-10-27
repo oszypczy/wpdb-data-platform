@@ -1,6 +1,6 @@
 ---
 name: stage2-cdc-findings
-description: Non-obvious Debezium/Kafka/registry behaviours found while building stage 2 (dropped-table hazard, txId:lsn ids, registry id reuse, cryptography SIGILL in Docker arm64 VM)
+description: Non-obvious Debezium/Kafka/registry behaviours (dropped-table hazard, txId:lsn ids, registry id reuse, cryptography SIGILL, idle-stack slot-ahead-of-offset fix, tests write only probe_shop tables)
 metadata:
   type: project
 ---
@@ -29,3 +29,16 @@ that are not derivable from the code and bit me at least once:
 - The heartbeat table must be in the publication (Debezium docs) and the slot only advances
   on offset commits (60 s), so slot lag of ~1–2 MB is normal while running.
 - The `kafka` MCP `describe_topic` errored on 3-partition topics (CLI works); `consume` works.
+
+Added 2026-10-26 (fix round after stage 4):
+- **Idle stack + connect restart → task FAILED "…no longer available on the server"**: Debezium
+  flushes the slot to the last *Kafka-acked* record, Connect persists an older snapshot of
+  offsets; on an idle DB restart_lsn == confirmed_flush_lsn, so one heartbeat of skew trips
+  `validateLogPosition` (lsn_proc < restart_lsn). Fixed with `offset.mismatch.strategy=
+  trust_greater_lsn` + explicit `lsn.flush.mode=connector`. Reproducible in ~10 s: `PUT
+  /connectors/X/stop`, heartbeat upsert as `debezium`, `pg_replication_slot_advance`
+  (loop until a running-xacts record moves restart_lsn), resume.
+- **Tests never write business tables** (Spark gold keeps status history even after DELETE).
+  Probe orders go to session tables `shop.zz_probe_<hex>_<table>` (fixture `probe_shop`);
+  the consumer maps them to their role via `rules.table_role`. Exceptions that remain:
+  evolution test (DDL + no-op UPDATE on shop.orders), compaction test (no-op UPDATE items).

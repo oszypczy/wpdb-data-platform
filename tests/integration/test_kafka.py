@@ -195,8 +195,9 @@ def test_new_table_gets_a_topic_from_the_default_group(
 
 
 def test_delete_gives_d_then_tombstone(probe_lifecycle):
-    """04 §8: DELETE of a shop.orders row → `op=d` (full before) followed by a tombstone
-    (same key, null value) so compaction can drop the key (04 §2)."""
+    """04 §8: DELETE of an orders row (the probe shop's mirror of shop.orders) → `op=d`
+    (full before) followed by a tombstone (same key, null value) so compaction can drop
+    the key (04 §2)."""
     lc = probe_lifecycle
     recs = lc.of("orders", lc.clean)
     d, t = recs[-2], recs[-1]
@@ -209,10 +210,13 @@ def test_delete_gives_d_then_tombstone(probe_lifecycle):
         assert ops[-2:] == ["d", "t"], (table, ops)
 
 
-def test_changes_of_one_row_stay_in_one_partition_in_order(probe_lifecycle):
+def test_changes_of_one_row_stay_in_one_partition_in_order(probe_lifecycle, topic_reader):
     """04 §8/§4: the events of one key (c, u, d, tombstone) land in one partition with
-    increasing offsets; two different probe keys may well hash elsewhere."""
+    increasing offsets; two different probe keys may well hash elsewhere. The probe
+    orders topic has the partition count of olist.shop.orders (3)."""
     lc = probe_lifecycle
+    probe_parts = topic_reader.partitions(lc.shop.topic("orders"))
+    assert probe_parts == topic_reader.partitions(topic("orders")) and len(probe_parts) == 3
     for order in (lc.clean, lc.bad):
         recs = lc.of("orders", order)
         assert [r.op for r in recs] == ["c", "u", "d", "t"]

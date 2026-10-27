@@ -1,1 +1,1 @@
-- [Stage 2 CDC findings](project_stage2_cdc_findings.md) — dropped-table hazard, txId:lsn ids, registry id reuse, cryptography SIGILL pin, registry client cache quirk
+- [Stage 2 CDC findings](project_stage2_cdc_findings.md) — dropped-table hazard, txId:lsn ids, registry id reuse, cryptography pin, idle-restart slot fix, probe_shop rule

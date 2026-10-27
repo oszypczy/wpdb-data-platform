@@ -13,6 +13,8 @@
   "slot.name": "debezium_slot",
   "publication.name": "dbz_publication",
   "publication.autocreate.mode": "disabled",
+  "lsn.flush.mode": "connector",
+  "offset.mismatch.strategy": "trust_greater_lsn",
   "schema.include.list": "shop",
   "table.exclude.list": "shop\\._.*",
 

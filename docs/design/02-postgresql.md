@@ -133,8 +133,11 @@ Test e2e (§10) porównuje je z tabelami silver w Delta. Zgodność dowodzi, że
 | `sim.v_truth_revenue_by_state` | `customer_state text, orders, items bigint, revenue numeric(14,2)` | złączenie z klientem (gold `dim_geography`) |
 | `sim.v_truth_payments` | `payment_type text, payments bigint, value numeric(14,2)` | per typ płatności |
 | `sim.v_truth_order_lifecycle` | `orders, approved, shipped, delivered, late bigint` | liczba zamówień z wypełnionym kamieniem milowym: dowód, że `UPDATE` doszły do silver/gold |
+| `sim.v_truth_reviews` | `review_score integer, reviews, orders bigint` | per ocena: liczba opinii i różnych zamówień (zamówienie może mieć kilka opinii); strona „Płatności i opinie” |
+| `sim.v_truth_reviews_by_delivery` | `on_time boolean, reviews bigint, avg_score numeric(4,2)` | tylko opinie zamówień dostarczonych (`order_delivered_customer_date IS NOT NULL`); `on_time = NOT coalesce(delivered > estimated, false)`, czyli negacja `is_late` z gold `fact_orders_lifecycle` (porównanie znaczników czasu, nie dat; brak estymaty = w terminie, jak `coalesce(…, false)` w Sparku) |
+| `sim.v_truth_payment_installments` | `payment_installments integer, payments bigint, value numeric(14,2)` | per liczba rat |
 
-Testy: `test_postgres.py::test_truth_views_exact_on_known_data` wykonuje plik dwa razy jako `shop_app` w jednorazowym kontenerze (ten sam obraz i initdb, `tests/helpers/postgres.py::InitdbProbe`) na znanym zestawie danych (`OLIST_FIXTURE_DATA`) i sprawdza dokładne wartości każdego widoku; `::test_truth_views_apply_and_reconcile` sprawdza na działającym stosie, że symulator utworzył widoki o ustalonych kolumnach, `reader` je czyta, a `v_truth_row_counts` równa się bezpośrednim `count(*)` w jednym snapshocie `REPEATABLE READ`.
+Testy: `test_postgres.py::test_truth_views_exact_on_known_data` wykonuje plik dwa razy jako `shop_app` w jednorazowym kontenerze (ten sam obraz i initdb, `tests/helpers/postgres.py::InitdbProbe`) na znanym zestawie danych (`OLIST_FIXTURE_DATA`) i sprawdza dokładne wartości każdego widoku; `::test_truth_views_apply_and_reconcile` sprawdza na działającym stosie, że symulator utworzył widoki o ustalonych kolumnach, `reader` je czyta, a `v_truth_row_counts` równa się bezpośrednim `count(*)` w jednym snapshocie `REPEATABLE READ`; widoki opinii i rat porównuje z niezależnie sformułowanymi zapytaniami na `shop.*` (oraz sumy z `v_truth_totals`). Symulator wykonuje plik tylko przy pierwszej inicjalizacji bazy: na stosie sprzed dodania widoku trzeba go wykonać ręcznie jako `shop_app` (`psql -U shop_app -d shop -f truth-views.sql`; tak zrobiono 2026-10-26 dla trzech widoków opinii i rat), świeży stos (`make reset`) ma je od razu.
 
 ## 9. Rozszerzenie: konfiguracja jako kod i strojenie
 
@@ -150,6 +153,7 @@ Testy: `test_postgres.py::test_truth_views_exact_on_known_data` wykonuje plik dw
 | integracyjny | uprawnienia roli `debezium` | odczyt i replikacja działają; INSERT/UPDATE/DDL w `shop` odrzucone; w `sim` tylko upsert `heartbeat` (`test_postgres.py::test_debezium_cannot_write`, `::test_sim_schema_privileges`, `::test_heartbeat_table_grants_and_publication`) |
 | integracyjny | skrypty startowe na pustym wolumenie, dwa razy | identyczny stan bazy |
 | integracyjny | DELETE z `order_items` po `order_id` | plan zapytania używa indeksu FK |
+| integracyjny | widoki prawdy (§8) | dokładne wartości na znanym zestawie danych, w tym `v_truth_reviews`, `v_truth_reviews_by_delivery`, `v_truth_payment_installments`; na żywym stosie zgodne z bezpośrednimi zapytaniami na `shop.*` (`test_postgres.py::test_truth_views_exact_on_known_data`, `::test_truth_views_apply_and_reconcile`) |
 | e2e | uzgadnianie | widoki `sim.v_truth_*` zgodne z tabelami silver w Delta po zakończeniu przebiegu |
 
 ## 11. Podsumowanie

@@ -117,18 +117,47 @@ def topic_reader(stack):
 
 
 @pytest.fixture(scope="session")
-def probe_lifecycle(stack, settings, topic_reader):
+def probe_shop(stack, settings):
+    """Per-session mirrors `shop.zz_probe_<hex>_{customers,orders,order_items,
+    order_payments}` of the business tables (same columns, types and PKs; topics with the
+    business topics' partitions and cleanup policy), written instead of the live tables
+    by every test that needs probe orders: committed changes of the business tables would
+    stay in Spark's gold history (tests/helpers/cdc.py::ProbeShop). Leftovers of an
+    interrupted session are swept first; at the end the tables are dropped once the
+    connector's offset passed their last change, then their subjects and topics."""
+    from tests.helpers import cdc
+
+    app = clients.pg_connect("shop_app", settings["SHOP_APP_PASSWORD"])
+    app.autocommit = True
+    admin = clients.kafka_admin()
+    registry = clients.Http(clients.SCHEMA_REGISTRY_URL)
+    connect = clients.Http(clients.CONNECT_URL)
+    leftovers = cdc.sweep_leftover_probe_tables(
+        app, connect, registry, admin, prefix=cdc.PROBE_SHOP_PREFIX
+    )
+    if leftovers:
+        print(f"\nswept probe shop tables left by an earlier session: {leftovers}")
+    shop = cdc.ProbeShop.create(app, admin)
+    try:
+        yield shop
+    finally:
+        shop.teardown(app, connect, registry, admin)
+        app.close()
+
+
+@pytest.fixture(scope="session")
+def probe_lifecycle(stack, settings, topic_reader, probe_shop):
     """Two synthetic orders written as shop_app through their whole lifecycle (03 §11,
-    04 §6/§8) and the records Debezium produced for them (tests/helpers/cdc.py).
-    Runs once per session; the rows are deleted again inside the lifecycle."""
+    04 §6/§8) in the probe shop's tables, and the records Debezium produced for them
+    (tests/helpers/cdc.py). Runs once per session; the rows are deleted again inside the
+    lifecycle."""
     from tests.helpers import cdc
 
     app = clients.pg_connect("shop_app", settings["SHOP_APP_PASSWORD"])
     app.autocommit = True
     try:
-        cdc.cleanup_probe_rows(app)
         cdc.wait_running(clients.Http(clients.CONNECT_URL))
-        return cdc.run_probe_lifecycle(app, topic_reader)
+        return cdc.run_probe_lifecycle(app, topic_reader, probe_shop)
     finally:
         app.close()
 

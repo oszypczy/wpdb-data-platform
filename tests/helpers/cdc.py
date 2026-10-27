@@ -2,10 +2,10 @@
 
 - connector status / wait helpers over the Connect REST API (`debezium-connector` skill),
 - replication slot and simulator state lookups through the read-only `reader` role,
-- the probe-order lifecycle: synthetic rows written as `shop_app` into the real
-  `shop.*` tables (03 §11 "INSERT, UPDATE i DELETE w shop.orders") and removed again,
-  so the truth views and the simulator's counters are unchanged afterwards. The probe
-  keys start with `test-stage2-` and are never produced by the simulator.
+- the probe-order lifecycle: synthetic rows written as `shop_app` into per-session
+  mirrors of the business tables (`shop.zz_probe_<hex>_<table>`, `ProbeShop`) and
+  removed again; the business tables of the live stack are never written (no residue in
+  Spark's gold history). The probe keys start with `test-stage2-`.
 """
 
 from __future__ import annotations
@@ -79,6 +79,19 @@ def wait_running(connect: Http, timeout: float = 120) -> dict:
     return wait_connector(connect, "RUNNING", ["RUNNING"], timeout)
 
 
+def stop_connector(connect: Http, timeout: float = 60) -> None:
+    """`PUT /connectors/<name>/stop` (KIP-875): the task shuts down, commits its last offset
+    and closes the replication connection; the connector stays registered as STOPPED."""
+    r = connect.put(f"/connectors/{CONNECTOR}/stop")
+    assert r.status_code in (200, 202, 204), (r.status_code, r.text)
+    wait_connector(connect, "STOPPED", [], timeout=timeout)
+
+
+def resume_connector(connect: Http) -> None:
+    r = connect.put(f"/connectors/{CONNECTOR}/resume")
+    assert r.status_code in (200, 202, 204), (r.status_code, r.text)
+
+
 def restart_failed_tasks(connect: Http) -> None:
     r = connect.post(
         f"/connectors/{CONNECTOR}/restart", params={"includeTasks": "true", "onlyFailed": "true"}
@@ -94,6 +107,14 @@ def committed_lsn(bootstrap: str | None = None) -> int | None:
     once this value passed its last change (the PK of a dropped table cannot be resolved
     any more: the re-delivered event would have no key and the compacted topic rejects it).
     """
+    offset = stored_offset(bootstrap)
+    return int(offset["lsn"]) if offset is not None else None
+
+
+def stored_offset(bootstrap: str | None = None) -> dict[str, Any] | None:
+    """The connector's last committed source offset (last record of connect-offsets):
+    `lsn`, `lsn_proc` (last completely processed, what the start-up check compares with
+    the slot's restart_lsn), `lsn_commit`, `txId`, `ts_usec`, `messageType`."""
     from confluent_kafka import Consumer, TopicPartition
 
     from tests.helpers.clients import KAFKA_BOOTSTRAP_HOST
@@ -118,7 +139,7 @@ def committed_lsn(bootstrap: str | None = None) -> int | None:
         key = json.loads(msg.key())
         if key[0] != CONNECTOR:
             return None
-        return int(json.loads(msg.value())["lsn"])
+        return json.loads(msg.value())
     finally:
         c.close()
 
@@ -139,7 +160,7 @@ def slot_state(pg: psycopg.Connection, slot: str = "debezium_slot") -> dict[str,
     row = pg.execute(
         "SELECT slot_name, active, confirmed_flush_lsn::text, "
         "pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)::bigint, "
-        "pg_current_wal_lsn()::text, wal_status "
+        "pg_current_wal_lsn()::text, wal_status, restart_lsn::text "
         "FROM pg_replication_slots WHERE slot_name = %s",
         (slot,),
     ).fetchone()
@@ -152,7 +173,64 @@ def slot_state(pg: psycopg.Connection, slot: str = "debezium_slot") -> dict[str,
         "lag_bytes": row[3],
         "current_lsn": row[4],
         "wal_status": row[5],
+        "restart_lsn": row[6],
     }
+
+
+def slot_pending_relations(
+    dbz: psycopg.Connection, upto: str, slot: str = "debezium_slot"
+) -> set[tuple[str, str]]:
+    """(schema, table) of every relation with a change in the slot between its
+    confirmed_flush_lsn and `upto`, read with pg_logical_slot_peek_binary_changes (nothing
+    is consumed; the slot must be inactive). pgoutput sends a Relation message ('R': int32
+    oid, namespace, name, ...) before the first change of every relation in a decoding
+    session, so the set of 'R' messages names every table the changes touch."""
+    rows = dbz.execute(
+        "SELECT data FROM pg_logical_slot_peek_binary_changes(%s, %s::pg_lsn, NULL, "
+        "'proto_version', '1', 'publication_names', 'dbz_publication')",
+        (slot, upto),
+    ).fetchall()
+    relations = set()
+    for (data,) in rows:
+        data = bytes(data)
+        if data[:1] == b"R":
+            namespace, name = data[5:].split(b"\0")[:2]
+            relations.add((namespace.decode(), name.decode()))
+        elif data[:1] == b"T":  # TRUNCATE carries relation oids only: report it as such
+            relations.add(("?", "truncate"))
+    return relations
+
+
+def advance_slot_past_stored_offset(
+    dbz: psycopg.Connection, stored_lsn_proc: int, timeout: float = 60
+) -> dict[str, Any]:
+    """Recreate the state of the 08 §14 incident on a STOPPED connector: the slot's
+    restart_lsn ahead of the stored offset, with only heartbeat changes in between.
+
+    As `debezium` (REPLICATION; the role that owns the slot) upsert dbz.heartbeat the way
+    heartbeat.action.query does, check that the WAL up to the current position carries
+    no change of any other table, and advance the slot there. restart_lsn only moves past
+    an xl_running_xacts record (the background writer logs one every 15 s while there is
+    WAL activity), so repeat until restart_lsn > the stored lsn_proc."""
+
+    def attempt() -> dict[str, Any] | None:
+        dbz.execute(
+            "INSERT INTO dbz.heartbeat (id, ts) VALUES (1, now()) "
+            "ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts"
+        )
+        target = dbz.execute("SELECT pg_current_wal_lsn()::text").fetchone()[0]
+        touched = slot_pending_relations(dbz, target)
+        if not touched <= {("dbz", "heartbeat")}:
+            return {"unsafe": touched}  # never skip a captured change: stop and fail
+        dbz.execute("SELECT pg_replication_slot_advance('debezium_slot', %s::pg_lsn)", (target,))
+        st = slot_state(dbz)
+        return st if lsn_to_int(st["restart_lsn"]) > stored_lsn_proc else None
+
+    st = wait_until(
+        attempt, timeout=timeout, every=3, desc="slot restart_lsn past the stored offset"
+    )
+    assert "unsafe" not in st, f"the WAL to skip holds changes of {st['unsafe']}"
+    return st
 
 
 def lsn_to_int(lsn: str) -> int:
@@ -220,7 +298,72 @@ def primary_key(pg: psycopg.Connection, table: str, schema: str = "shop") -> lis
     return [r[0] for r in rows]
 
 
-# --- probe order lifecycle ---------------------------------------------------------------
+# --- probe shop: mirrors of the business tables for the probe lifecycle -------------------
+# Integration tests never write into the business tables of the live stack (00-overview,
+# "Pozostało do zrobienia"): Spark turns every committed change of shop.orders into gold
+# history (status transitions, funnel), which a later DELETE does not undo. The probe
+# orders live in per-session copies `shop.zz_probe_<hex>_<table>` instead: captured by
+# Debezium like any shop table (topic olist.shop.zz_probe_<hex>_<table>, own subjects),
+# processed by Spark into bronze/silver, never into gold (not in GOLD_SOURCES), and
+# validated by the consumer with the rules of the table they mirror (consumer.rules
+# .table_role). The topics are created up front with the partition count and cleanup
+# policy of the business topic, so the partitioning claims hold for them too.
+PROBE_SHOP_PREFIX = "zz_probe_"
+PROBE_SHOP_TABLES = ("customers", "orders", "order_items", "order_payments")
+
+
+@dataclass(frozen=True)
+class ProbeShop:
+    tag: str
+
+    def table(self, role: str) -> str:
+        """`orders` → `zz_probe_<tag>_orders`."""
+        return f"{PROBE_SHOP_PREFIX}{self.tag}_{role}"
+
+    def qualified(self, role: str) -> str:
+        return f"shop.{self.table(role)}"
+
+    def topic(self, role: str) -> str:
+        return topic(self.table(role))
+
+    def role_of(self, table_or_topic: str) -> str:
+        name = table_or_topic.rsplit(".", 1)[-1]
+        prefix = f"{PROBE_SHOP_PREFIX}{self.tag}_"
+        return name[len(prefix) :] if name.startswith(prefix) else name
+
+    @classmethod
+    def create(cls, app: psycopg.Connection, admin) -> ProbeShop:
+        from confluent_kafka.admin import ConfigResource, NewTopic
+
+        shop = cls(uuid.uuid4().hex[:8])
+        for role in PROBE_SHOP_TABLES:
+            real = topic(role)
+            parts = len(admin.list_topics(real, timeout=10).topics[real].partitions)
+            res = ConfigResource(ConfigResource.Type.TOPIC, real)
+            described = admin.describe_configs([res])[res].result(timeout=15)
+            config = {k: described[k].value for k in ("cleanup.policy", "segment.ms")}
+            t = shop.topic(role)
+            admin.create_topics([NewTopic(t, parts, 1, config=config)])[t].result(timeout=30)
+        with app.transaction():
+            for role in PROBE_SHOP_TABLES:
+                # same columns, types, NOT NULL and PK as the business table; no FKs (the
+                # event trigger makes it REPLICA IDENTITY FULL like every shop table)
+                app.execute(
+                    f"CREATE TABLE {shop.qualified(role)} (LIKE shop.{role} "
+                    "INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES)"
+                )
+        return shop
+
+    def teardown(self, app, connect: Http, registry: Http, admin) -> None:
+        """Drop the tables once the connector committed past every change they had
+        (03 §13), then their subjects and topics. On a timeout they stay and the next
+        session's sweep removes them."""
+        now = lsn_to_int(app.execute("SELECT pg_current_wal_lsn()::text").fetchone()[0])
+        wait_committed_past(now)
+        for role in reversed(PROBE_SHOP_TABLES):
+            drop_captured_table(app, self.table(role), connect, registry, admin)
+
+
 @dataclass(frozen=True)
 class ProbeOrder:
     order_id: str
@@ -241,94 +384,95 @@ def probe_ids(tag: str) -> tuple[str, str]:
 
 
 def probe_purchase(
-    app: psycopg.Connection, tag: str, status: str, purchase_ts: datetime
+    app: psycopg.Connection, shop: ProbeShop, tag: str, status: str, purchase_ts: datetime
 ) -> ProbeOrder:
-    """customer + order + item + payment in ONE transaction (02 §6), as the simulator does."""
+    """customer + order + item + payment in ONE transaction (02 §6), as the simulator
+    does, into the probe shop's tables (real product/seller ids, read only)."""
     oid, cid = probe_ids(tag)
     product = app.execute("SELECT product_id FROM shop.products LIMIT 1").fetchone()[0]
     seller = app.execute("SELECT seller_id FROM shop.sellers LIMIT 1").fetchone()[0]
     price, freight, payment = Decimal("58.90"), Decimal("13.29"), Decimal("72.19")
     with app.transaction():
         app.execute(
-            "INSERT INTO shop.customers (customer_id, customer_unique_id, "
+            f"INSERT INTO {shop.qualified('customers')} (customer_id, customer_unique_id, "
             "customer_zip_code_prefix, customer_city, customer_state) "
             "VALUES (%s, %s, '01037', 'sao paulo', 'SP')",
             (cid, cid),
         )
         app.execute(
-            "INSERT INTO shop.orders (order_id, customer_id, order_status, "
+            f"INSERT INTO {shop.qualified('orders')} (order_id, customer_id, order_status, "
             "order_purchase_timestamp, order_estimated_delivery_date) "
             "VALUES (%s, %s, %s, %s, %s + interval '30 days')",
             (oid, cid, status, purchase_ts, purchase_ts),
         )
         app.execute(
-            "INSERT INTO shop.order_items (order_id, order_item_id, product_id, seller_id, "
-            "shipping_limit_date, price, freight_value) VALUES (%s, 1, %s, %s, %s, %s, %s)",
+            f"INSERT INTO {shop.qualified('order_items')} (order_id, order_item_id, product_id, "
+            "seller_id, shipping_limit_date, price, freight_value) "
+            "VALUES (%s, 1, %s, %s, %s, %s, %s)",
             (oid, product, seller, purchase_ts, price, freight),
         )
         app.execute(
-            "INSERT INTO shop.order_payments (order_id, payment_sequential, payment_type, "
-            "payment_installments, payment_value) VALUES (%s, 1, 'credit_card', 1, %s)",
+            f"INSERT INTO {shop.qualified('order_payments')} (order_id, payment_sequential, "
+            "payment_type, payment_installments, payment_value) "
+            "VALUES (%s, 1, 'credit_card', 1, %s)",
             (oid, payment),
         )
     return ProbeOrder(oid, cid, purchase_ts, price, freight, payment)
 
 
-def probe_set_status(app: psycopg.Connection, order: ProbeOrder, status: str, **cols: Any) -> None:
+def probe_set_status(
+    app: psycopg.Connection, shop: ProbeShop, order: ProbeOrder, status: str, **cols: Any
+) -> None:
     sets = ", ".join(["order_status = %s"] + [f"{c} = %s" for c in cols])
     app.execute(
-        f"UPDATE shop.orders SET {sets} WHERE order_id = %s",
+        f"UPDATE {shop.qualified('orders')} SET {sets} WHERE order_id = %s",
         (status, *cols.values(), order.order_id),
     )
 
 
-def probe_delete(app: psycopg.Connection, order: ProbeOrder) -> None:
+def probe_delete(app: psycopg.Connection, shop: ProbeShop, order: ProbeOrder) -> None:
     """Remove the probe rows in one transaction (children first)."""
     with app.transaction():
-        app.execute("DELETE FROM shop.order_payments WHERE order_id = %s", (order.order_id,))
-        app.execute("DELETE FROM shop.order_items WHERE order_id = %s", (order.order_id,))
-        app.execute("DELETE FROM shop.orders WHERE order_id = %s", (order.order_id,))
-        app.execute("DELETE FROM shop.customers WHERE customer_id = %s", (order.customer_id,))
-
-
-def cleanup_probe_rows(app: psycopg.Connection) -> None:
-    """Safety net for interrupted runs: drop every test-stage2-* row that is left."""
-    with app.transaction():
-        for t in ("order_payments", "order_items", "order_reviews"):
-            app.execute(f"DELETE FROM shop.{t} WHERE order_id LIKE 'test-stage2-%%'")
-        app.execute("DELETE FROM shop.orders WHERE order_id LIKE 'test-stage2-%%'")
-        app.execute("DELETE FROM shop.customers WHERE customer_id LIKE 'test-stage2-%%'")
+        for role in ("order_payments", "order_items", "orders"):
+            app.execute(
+                f"DELETE FROM {shop.qualified(role)} WHERE order_id = %s", (order.order_id,)
+            )
+        app.execute(
+            f"DELETE FROM {shop.qualified('customers')} WHERE customer_id = %s",
+            (order.customer_id,),
+        )
 
 
 @dataclass
 class Lifecycle:
     """What one run of the probe lifecycle produced (see conftest `probe_lifecycle`)."""
 
+    shop: ProbeShop
     clean: ProbeOrder  # created → approved → deleted
     bad: ProbeOrder  # delivered → created (forbidden transition, 04 §6) → deleted
     start: dict[str, Watermarks]
     records: dict[str, list[Record]]  # new records per topic since `start`
 
-    def of(self, table: str, order: ProbeOrder) -> list[Record]:
+    def of(self, role: str, order: ProbeOrder) -> list[Record]:
+        """Records of `order` in the probe table that mirrors `role` (e.g. `orders`)."""
         return [
             r
-            for r in self.records[topic(table)]
+            for r in self.records[self.shop.topic(role)]
             if (r.key or {}).get("order_id") == order.order_id
-            or (table == "customers" and (r.key or {}).get("customer_id") == order.customer_id)
+            or (role == "customers" and (r.key or {}).get("customer_id") == order.customer_id)
         ]
 
 
-def run_probe_lifecycle(app: psycopg.Connection, reader: TopicReader) -> Lifecycle:
-    tables = ("customers", "orders", "order_items", "order_payments")
-    topics = [topic(t) for t in tables] + [TRANSACTION_TOPIC]
+def run_probe_lifecycle(app: psycopg.Connection, reader: TopicReader, shop: ProbeShop) -> Lifecycle:
+    topics = [shop.topic(t) for t in PROBE_SHOP_TABLES] + [TRANSACTION_TOPIC]
     start = {t: reader.watermarks(t) for t in topics}
     clock = sim_state(app)["sim_clock"] or datetime(2017, 1, 5)
-    clean = probe_purchase(app, "clean", "created", clock)
-    probe_set_status(app, clean, "approved", order_approved_at=clock)
-    probe_delete(app, clean)
-    bad = probe_purchase(app, "bad", "delivered", clock)
-    probe_set_status(app, bad, "created")
-    probe_delete(app, bad)
+    clean = probe_purchase(app, shop, "clean", "created", clock)
+    probe_set_status(app, shop, clean, "approved", order_approved_at=clock)
+    probe_delete(app, shop, clean)
+    bad = probe_purchase(app, shop, "bad", "delivered", clock)
+    probe_set_status(app, shop, bad, "created")
+    probe_delete(app, shop, bad)
 
     def complete(recs: list[Record]) -> bool:
         ops = {}
@@ -341,12 +485,12 @@ def run_probe_lifecycle(app: psycopg.Connection, reader: TopicReader) -> Lifecyc
     for t in topics:
         if t == TRANSACTION_TOPIC:
             continue
-        done = complete if t == topic("orders") else _has_tombstones(clean, bad, t)
+        done = complete if t == shop.topic("orders") else _has_tombstones(clean, bad, t)
         records[t] = reader.read_new(start[t], done, timeout=90)
     # the END record of every probe transaction carries the same id as its data events
     tx_ids = {
         tx_prefix(r.value["transaction"]["id"])
-        for r in records[topic("orders")]
+        for r in records[shop.topic("orders")]
         if r.value
         and r.value.get("transaction")
         and (r.key or {}).get("order_id") in (clean.order_id, bad.order_id)
@@ -354,7 +498,7 @@ def run_probe_lifecycle(app: psycopg.Connection, reader: TopicReader) -> Lifecyc
     records[TRANSACTION_TOPIC] = reader.read_new(
         start[TRANSACTION_TOPIC], lambda recs: _transactions_done(recs, tx_ids), timeout=90
     )
-    return Lifecycle(clean=clean, bad=bad, start=start, records=records)
+    return Lifecycle(shop=shop, clean=clean, bad=bad, start=start, records=records)
 
 
 def _has_tombstones(clean: ProbeOrder, bad: ProbeOrder, t: str):
@@ -435,13 +579,16 @@ def drop_captured_table(app, table: str, connect: Http, registry: Http, admin) -
         admin.delete_topics([t])[t].result(timeout=30)
 
 
-def sweep_leftover_probe_tables(app, connect: Http, registry: Http, admin) -> list[str]:
-    """Drop captured probe tables an earlier session had to leave behind (teardown timed
-    out waiting for the offset commit). Waits until the connector committed past the
-    current WAL position first, which covers every change those tables ever had."""
+def sweep_leftover_probe_tables(
+    app, connect: Http, registry: Http, admin, prefix: str = PROBE_PREFIX
+) -> list[str]:
+    """Drop captured probe tables (`prefix`*) an earlier session had to leave behind
+    (teardown timed out waiting for the offset commit, or the run was interrupted). Waits
+    until the connector committed past the current WAL position first, which covers every
+    change those tables ever had."""
     rows = app.execute(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'shop' AND tablename LIKE %s",
-        (PROBE_PREFIX.replace("_", "\\_") + "%",),
+        (prefix.replace("_", "\\_") + "%",),
     ).fetchall()
     leftovers = [r[0] for r in rows]
     if leftovers:
