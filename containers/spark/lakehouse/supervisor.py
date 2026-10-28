@@ -8,10 +8,18 @@
   reaching bronze/silver); the supervisor restarts that one query from its checkpoint
   (the container and the other queries keep running). A query failing more than
   ``MAX_FAILURES`` times in ``FAILURE_WINDOW_S`` stops the process with exit code 1
-  so Docker restarts the container (``restart: unless-stopped``).
+  so Docker restarts the container (``restart: unless-stopped``). From the second
+  failure in the window a query is restarted with a growing delay (``restart_delay``),
+  so a lasting store error (MinIO full, 08 §12.8) neither spins nor crash-loops; every
+  failure is logged with the S3 status and error code found in the error
+  (``s3_error``), e.g. ``S3 507 XMinioStorageFull``.
+- Health: a query counts as working when it is active and, if it failed recently, has
+  completed a trigger since (``recovering`` otherwise); the status turns ``degraded``
+  and the change is logged together with the last S3 error.
 - The loop waits with ``spark.streams.awaitAnyTermination(timeout)`` (never on one
-  query), writes the health file for the healthcheck, flushes the stream metrics and
-  runs the maintenance job on schedule.
+  query) and writes the health file for the healthcheck; the stream metrics flush and
+  the maintenance job run in background threads, so a slow or failing write to MinIO
+  never blocks the loop (it used to: 08 §12.8).
 """
 
 from __future__ import annotations
@@ -19,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -40,6 +49,38 @@ DISCOVERY_EVERY_S = 10
 FLUSH_EVERY_S = 30
 RETIRE_IDLE_S = 120
 MAINTENANCE_TRIGGER = "/tmp/spark/run-maintenance"
+RECOVERING_S = 300  # a failure older than this no longer marks a query as recovering
+
+# "... (Service: Amazon S3; Status Code: 507; Error Code: XMinioStorageFull; ..."
+_S3_STATUS = re.compile(r"Status Code: (\d{3}); Error Code: ([\w.-]+)")
+# MinIO's own codes, should the SDK's "(Service: ...)" suffix be missing
+_S3_CODE = re.compile(r"\b(XMinio\w+)\b")
+S3_HINTS = {
+    "XMinioStorageFull": "MinIO's disk is full: free space, Spark resumes by itself (08 §12.8)",
+}
+
+
+def s3_error(text: str) -> str:
+    """The S3 status and error code inside a (possibly long, nested) Spark error, e.g.
+    ``S3 507 XMinioStorageFull: MinIO's disk is full ...``; "" when there is none."""
+    m = _S3_STATUS.search(text or "")
+    if m:
+        status, code = m.group(1), m.group(2)
+    else:
+        m2 = _S3_CODE.search(text or "")
+        if not m2:
+            return ""
+        status, code = "", m2.group(1)
+    hint = S3_HINTS.get(code)
+    return " ".join(p for p in ("S3", status, code) if p) + (f": {hint}" if hint else "")
+
+
+def restart_delay(failures: int) -> float:
+    """Seconds before a failed query is started again: at once after its first failure
+    in the window (a schema change, 05 §5), then 10, 20, 40, 60, 60 ... s."""
+    if failures <= 1:
+        return 0.0
+    return float(min(60, 5 * 2 ** (failures - 1)))
 
 
 @dataclass
@@ -51,6 +92,9 @@ class Managed:
     started_at: float = 0.0
     restarts: int = 0
     last_error: str = ""
+    last_cause: str = ""  # s3_error() of the last failure
+    query_id: str = ""
+    start_at: float = 0.0  # earliest next start after a failure (restart_delay)
 
 
 class Supervisor:
@@ -70,6 +114,8 @@ class Supervisor:
         self._last_flush = time.time()
         self._last_maintenance = time.time()
         self._maintenance: threading.Thread | None = None
+        self._flush: threading.Thread | None = None
+        self._status: str | None = None
 
     # ------------------------------------------------------------ query control
     def add(self, name: str, starter: Callable[[], StreamingQuery]) -> None:
@@ -81,6 +127,7 @@ class Supervisor:
         try:
             m.query = m.starter()
             m.started_at = time.time()
+            m.query_id = str(m.query.id)
             log.info("started query %s (id %s)", m.name, m.query.id)
         except Exception as exc:  # noqa: BLE001 - recorded as a failure, retried
             m.query = None
@@ -90,15 +137,20 @@ class Supervisor:
         now = time.time()
         m.failures = [t for t in m.failures if now - t < FAILURE_WINDOW_S] + [now]
         m.last_error = error[:2000]
+        m.start_at = now + restart_delay(len(m.failures))
+        cause = m.last_cause = s3_error(error)
         log.warning(
-            "query %s stopped (%d in %d s): %s",
+            "query %s stopped (%d in %d s, restart in %.0f s)%s: %s",
             m.name,
             len(m.failures),
             FAILURE_WINDOW_S,
+            m.start_at - now,
+            f" [{cause}]" if cause else "",
             error[:500],
         )
         if len(m.failures) > MAX_FAILURES:
-            raise SystemExit(f"query {m.name} keeps failing: {error[:500]}")
+            raise SystemExit(f"query {m.name} keeps failing{f' [{cause}]' if cause else ''}: "
+                             f"{error[:500]}")  # fmt: skip
 
     def check_queries(self) -> None:
         for m in self.managed.values():
@@ -107,9 +159,19 @@ class Supervisor:
                 continue
             if q is not None:
                 exc = q.exception()
+                m.query = None
                 self._failed(m, str(exc) if exc else "terminated")
+            if time.time() < m.start_at:
+                continue  # restart_delay: inactive (and unhealthy) until then
             m.restarts += 1
             self._start(m)
+
+    def recovering(self, m: Managed, now: float) -> bool:
+        """Failed within RECOVERING_S and no trigger completed since (a restarted query
+        stuck in the same store error again)."""
+        if not m.failures or now - m.failures[-1] >= RECOVERING_S:
+            return False
+        return self.listener.last_alive.get(m.query_id, 0.0) < m.failures[-1]
 
     # ---------------------------------------------------------------- discovery
     def kafka_topics(self) -> set[str] | None:
@@ -186,17 +248,25 @@ class Supervisor:
         now = time.time()
         queries = {}
         ok = "kafka_to_bronze" in self.managed
+        bad = []
         for m in self.managed.values():
             active = bool(m.query is not None and m.query.isActive)
-            ok = ok and active
+            recovering = self.recovering(m, now)
+            if not active or recovering:
+                bad.append(m)
             queries[m.name] = {
                 "active": active,
+                "recovering": recovering,
                 "restarts": m.restarts,
                 "recent_failures": len(m.failures),
                 "last_progress": self.listener.last_progress.get(m.name),
                 "last_error": m.last_error[:300],
+                "last_cause": m.last_cause,
             }
-        doc = {"ts": now, "status": "ok" if ok else "degraded", "queries": queries}
+        status = "ok" if ok and not bad else "degraded"
+        if status != self._status:
+            self._log_status(status, bad)
+        doc = {"ts": now, "status": status, "queries": queries}
         path = self.settings.health_file
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
@@ -204,14 +274,42 @@ class Supervisor:
             json.dump(doc, f, indent=1)
         os.replace(tmp, path)
 
+    def _log_status(self, status: str, bad: list[Managed]) -> None:
+        if status == "ok":
+            if self._status is not None:
+                log.info("health ok: all %d queries active and working", len(self.managed))
+        else:
+            causes = sorted({m.last_cause for m in bad if m.last_cause})
+            log.warning(
+                "health degraded: %d of %d queries not working (%s)%s",
+                len(bad),
+                len(self.managed),
+                ", ".join(m.name for m in bad) or "kafka_to_bronze not started",
+                f"; last S3 error: {'; '.join(causes)}" if causes else "",
+            )
+        self._status = status
+
+    def maybe_flush_metrics(self, now: float) -> None:
+        """In a background thread: an append to ops/ waits for S3A retries when MinIO
+        rejects writes, and must not stall the loop (the health file, restarts)."""
+        if now - self._last_flush < FLUSH_EVERY_S:
+            return
+        if self._flush is not None and self._flush.is_alive():
+            return
+        self._last_flush = now
+        self._flush = threading.Thread(target=self.flush_metrics, name="metrics", daemon=True)
+        self._flush.start()
+
     def flush_metrics(self) -> None:
         try:
             from lakehouse.metrics import LATENCY
 
             self.listener.flush(self.spark, self.lake.ops("stream_metrics"))
             LATENCY.flush(self.spark, self.lake.ops("e2e_latency"))
-        except Exception:  # noqa: BLE001 - metrics must not stop the pipeline
-            log.exception("flushing stream metrics failed")
+        except Exception as exc:  # noqa: BLE001 - metrics must not stop the pipeline
+            cause = s3_error(str(exc))
+            log.warning("flushing stream metrics failed%s: %s",
+                        f" [{cause}]" if cause else "", str(exc)[:500])  # fmt: skip
 
     def maybe_maintenance(self) -> None:
         if self._maintenance is not None and self._maintenance.is_alive():
@@ -227,8 +325,9 @@ class Supervisor:
         def work() -> None:
             try:
                 maintenance.run(self.spark, self.lake)
-            except Exception:  # noqa: BLE001
-                log.exception("maintenance failed")
+            except Exception as exc:  # noqa: BLE001
+                cause = s3_error(str(exc))
+                log.exception("maintenance failed%s", f" [{cause}]" if cause else "")
 
         self._maintenance = threading.Thread(target=work, name="maintenance", daemon=True)
         self._maintenance.start()
@@ -247,9 +346,7 @@ class Supervisor:
                     log.exception("discovery failed")
             self.check_queries()
             self.write_health()
-            if now - self._last_flush >= FLUSH_EVERY_S:
-                self._last_flush = now
-                self.flush_metrics()
+            self.maybe_flush_metrics(now)
             self.maybe_maintenance()
             # wake up as soon as any query terminates (never block on a single one);
             # a query that died with an error re-raises it here: handled by

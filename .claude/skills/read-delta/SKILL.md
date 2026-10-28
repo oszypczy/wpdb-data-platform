@@ -36,8 +36,10 @@ opts = {"AWS_ACCESS_KEY_ID": "dashboard", "AWS_SECRET_ACCESS_KEY": "…",
 dt = DeltaTable("s3://gold/fact_order_items", storage_options=opts)
 dt.version(); dt.history(5); dt.schema()
 df = dt.to_pandas()
-old = DeltaTable("s3://gold/fact_order_items", version=120, storage_options=opts).to_pandas()
-cdf = DeltaTable("s3://silver/orders", storage_options=opts).load_cdf(starting_version=10)
+old = DeltaTable("s3://gold/fact_order_items", version=max(dt.version() - 1, 0),
+                 storage_options=opts).to_pandas()  # previous version, works on a young stack
+orders = DeltaTable("s3://silver/orders", storage_options=opts)
+cdf = orders.load_cdf(starting_version=max(orders.version() - 5, 0))
 ```
 
 Inside a container the endpoint is `http://minio:9000`. Writing fixtures for tests:

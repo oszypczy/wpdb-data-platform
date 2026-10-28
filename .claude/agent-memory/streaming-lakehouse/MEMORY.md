@@ -1,3 +1,3 @@
 - [User progress check-ins](user_progress_updates.md) — user asks "ile %?" in Polish mid-task; answer briefly with % and remaining work, keep going
 - [Stage 3 status](project_stage3_status.md) — Spark+Delta built 2026-10-23, awaiting QA; e2e deferred; open items (Connect offset, CPU bursts)
-- [Ops gotchas](project_ops_gotchas.md) — up --build spark recreates deps (use --no-deps), delta-rs script hang, CHECK rejects NULL
+- [Ops gotchas](project_ops_gotchas.md) — --no-deps rebuild, delta-rs hang, CHECK vs NULL, idle queries, silent S3A retries, host sleep, e2e -k minio

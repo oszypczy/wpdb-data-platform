@@ -59,6 +59,12 @@ class MetricsListener(StreamingQueryListener):
         self._lock = threading.Lock()
         self.last_progress: dict[str, float] = {}
         self.last_input: dict[str, float] = {}
+        # last sign that a query completes triggers: a finished micro-batch or an idle
+        # trigger (Spark 3.5 posts QueryIdleEvent instead of an empty progress event);
+        # the supervisor's health uses it to tell a restarted query that works again
+        # from one that keeps failing (08 §12.8). Keyed by query id: QueryIdleEvent has
+        # no name, and the id stays the same across restarts from one checkpoint
+        self.last_alive: dict[str, float] = {}
 
     def onQueryStarted(self, event) -> None:  # noqa: N802 - Spark API
         pass
@@ -69,6 +75,7 @@ class MetricsListener(StreamingQueryListener):
             now = time.time()
             name = p.name or str(p.id)
             self.last_progress[name] = now
+            self.last_alive[str(p.id)] = now
             idle = int(p.numInputRows or 0) == 0
             if not idle:
                 self.last_input[name] = now
@@ -82,7 +89,10 @@ class MetricsListener(StreamingQueryListener):
             log.exception("metrics listener failed")
 
     def onQueryIdle(self, event) -> None:  # noqa: N802
-        pass
+        try:
+            self.last_alive[str(event.id)] = time.time()
+        except Exception:  # noqa: BLE001 - never break the listener bus
+            log.exception("metrics listener failed")
 
     def onQueryTerminated(self, event) -> None:  # noqa: N802
         pass

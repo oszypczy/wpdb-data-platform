@@ -9,7 +9,7 @@ Podział odpowiedzialności: [05-spark.md](05-spark.md) opisuje, *co* jest liczo
 - **MinIO** w compose: własny obraz `wpdb/minio` zbudowany ze źródeł z przypiętego tagu (`containers/minio/Dockerfile`, patrz niżej „Dystrybucja MinIO”), wolumen `minio_data`, healthcheck `/minio/health/live`.
 - **Dostęp Sparka przez S3A:** endpoint `http://minio:9000`, `fs.s3a.path.style.access=true`, `fs.s3a.connection.ssl.enabled=false`.
 - **Zapis w formacie Delta.**
-- **Dokumentacja odczytu danych** (§8): wymóg specyfikacji.
+- **Dokumentacja odczytu danych** (§9): wymóg specyfikacji.
 
 ## 2. Rozszerzenie: kubełek na warstwę
 
@@ -54,9 +54,10 @@ silver/orders/_delta_log/00000000000000000042.json
 ## 4. Rozszerzenie: time travel i RESTORE
 
 ```sql
-SELECT sum(price) FROM gold.fact_order_items VERSION AS OF 120;
-SELECT * FROM gold.fact_orders_lifecycle TIMESTAMP AS OF '2026-10-19 14:00';
-RESTORE TABLE gold.dim_customer TO VERSION AS OF 95;
+-- numery wersji: z DESCRIBE HISTORY (na młodym stosie jest ich kilka; 0 = utworzenie tabeli)
+SELECT sum(price) FROM delta.`s3a://gold/fact_order_items` VERSION AS OF 0;
+SELECT * FROM delta.`s3a://gold/fact_orders_lifecycle` TIMESTAMP AS OF '2026-10-19 14:00';  -- chwila po utworzeniu tabeli
+RESTORE TABLE delta.`s3a://gold/dim_customer` TO VERSION AS OF 0;
 ```
 
 - **Analiza:** porównanie stanu przed i po zdarzeniu (np. Black Friday).
@@ -111,7 +112,7 @@ Wniosek: przy tej skali tabele gold mieszczą się w jednym pliku, bo każdy MER
 
 Checkpointy wszystkich zapytań strumieniowych są w kubełku `checkpoints`. Cały stan przetwarzania (dane i pozycje strumieni) jest w MinIO, więc **kontener Sparka jest bezstanowy**: po usunięciu i ponownym utworzeniu wznawia pracę od miejsca, w którym skończył. Koszt to wolniejsze checkpointy niż na dysku lokalnym. MinIO ma silną spójność, a poprawność sprawdza test e2e.
 
-Etap 3: `checkpoints/<zapytanie>/` (`kafka_to_bronze`, `silver_<tabela>`, `silver_to_gold`, `gold_transitions`, `gold_agg_revenue`, `gold_agg_funnel`) plus dwa pliki projektu: `_wpdb_txn_app_id` (token `txnAppId` danego checkpointu, [05-spark.md](05-spark.md) §12) i `_wpdb_gold_versions/<paczka>.json` (wersje silver przypięte do paczki gold, ostatnie 20). Stan agregacji okienkowych (state store) też jest w checkpoincie. Koszt S3A: ok. 0,3 s na mikropaczkę poza samym przetwarzaniem (zapis `offsets/` i `commits/`), zmierzone w `ops/stream_metrics`. Restart kontenera wznawia z checkpointów bez duplikatów w bronze (`tests/integration/test_spark.py::test_restart_from_checkpoint_keeps_bronze_offsets_unique`); usunięcie i odtworzenie kontenera z uzgadnianiem: e2e w etapie 5.
+Etap 3: `checkpoints/<zapytanie>/` (`kafka_to_bronze`, `silver_<tabela>`, `silver_to_gold`, `gold_transitions`, `gold_agg_revenue`, `gold_agg_funnel`) plus dwa pliki projektu: `_wpdb_txn_app_id` (token `txnAppId` danego checkpointu, [05-spark.md](05-spark.md) §12) i `_wpdb_gold_versions/<paczka>.json` (wersje silver przypięte do paczki gold, ostatnie 20). Stan agregacji okienkowych (state store) też jest w checkpoincie. Koszt S3A: ok. 0,3 s na mikropaczkę poza samym przetwarzaniem (zapis `offsets/` i `commits/`), zmierzone w `ops/stream_metrics`. Restart kontenera wznawia z checkpointów bez duplikatów w bronze (`tests/integration/test_spark.py::test_restart_from_checkpoint_keeps_bronze_offsets_unique`); usunięcie i odtworzenie kontenera z uzgadnianiem: `tests/e2e/test_pipeline.py::test_removed_and_recreated_spark_container_resumes_from_minio_checkpoints` (etap 5).
 
 ## 9. Odczyt danych (wymagana dokumentacja) i odczyt bez Sparka
 
@@ -139,15 +140,17 @@ Wszystkie tabele są w formacie Delta w MinIO: `s3://<warstwa>/<tabela>` (Spark:
 | `ops/quarantine` | wiersze łamiące reguły jakości (`rule`, `severity`, `record_key`, `payload`) | `(rule, source_table, record_key)` | |
 | `ops/maintenance_log` | przebiegi OPTIMIZE/VACUUM z pomiarem przed/po | – | tylko dopisywanie |
 
-**DuckDB (CLI, Python albo serwer MCP `duckdb` agentów):**
+**DuckDB (CLI, Python albo serwer MCP `duckdb` agentów):** jeden sekret na konto, z zakresem (`SCOPE`) kubełków, do których konto ma dostęp; DuckDB wybiera sekret o najdłuższym pasującym zakresie (sprawdzone `which_secret()` w DuckDB 1.5.6).
 ```sql
 INSTALL delta; LOAD delta; INSTALL httpfs; LOAD httpfs;
 SET TimeZone = 'UTC';   -- znaczniki czasu Delta to UTC; bez tego DuckDB pokaże strefę hosta
-CREATE SECRET minio (TYPE s3, KEY_ID 'dashboard', SECRET '<MINIO_DASHBOARD_SECRET_KEY>',
-                     ENDPOINT '127.0.0.1:9000', URL_STYLE 'path', USE_SSL false, REGION 'us-east-1');
+CREATE SECRET pub  (TYPE s3, KEY_ID 'dashboard', SECRET '<MINIO_DASHBOARD_SECRET_KEY>', ENDPOINT '127.0.0.1:9000',
+                    URL_STYLE 'path', USE_SSL false, REGION 'us-east-1', SCOPE ['s3://gold', 's3://ops']);
+-- silver/bronze: konto agent (tylko odczyt; dashboard nie ma do nich dostępu)
+CREATE SECRET lake (TYPE s3, KEY_ID 'agent', SECRET '<MINIO_AGENT_SECRET_KEY>', ENDPOINT '127.0.0.1:9000',
+                    URL_STYLE 'path', USE_SSL false, REGION 'us-east-1', SCOPE ['s3://silver', 's3://bronze']);
 SELECT customer_state, sum(price) FROM delta_scan('s3://gold/fact_order_items') GROUP BY 1 ORDER BY 2 DESC LIMIT 5;
 SELECT order_status, count(*) FROM delta_scan('s3://gold/fact_orders_lifecycle') GROUP BY 1;
--- silver/bronze wymagają konta agent (dashboard nie ma do nich dostępu)
 SELECT count(*) FROM delta_scan('s3://silver/orders') WHERE NOT _is_deleted;
 SELECT op, before.order_status, after.order_status FROM delta_scan('s3://bronze/orders') LIMIT 5;
 ```
@@ -159,16 +162,36 @@ opts = {"AWS_ACCESS_KEY_ID": "dashboard", "AWS_SECRET_ACCESS_KEY": "…",
         "AWS_ENDPOINT_URL": "http://127.0.0.1:9000", "AWS_ALLOW_HTTP": "true", "AWS_REGION": "us-east-1"}
 dt = DeltaTable("s3://gold/fact_order_items", storage_options=opts)
 dt.version(); dt.history(5); dt.schema(); dt.metadata().configuration   # CHECK, właściwości
-df = dt.to_pandas()                                                      # albo dt.to_pyarrow_table()
-old = DeltaTable("s3://gold/fact_order_items", version=120, storage_options=opts).to_pandas()
-cdf = DeltaTable("s3://silver/orders", storage_options=agent_opts).load_cdf(starting_version=10)
+# Spark zapisuje timestamp jako Parquet INT96; pyarrow czyta INT96 w ns, co przepełnia się dla
+# dim_customer.valid_to = 9999-12-31, więc czytamy w µs (jak dashboard, 07 §5)
+import pyarrow.dataset as pds
+read = pds.ParquetReadOptions(coerce_int96_timestamp_unit="us")
+df = dt.to_pyarrow_dataset(parquet_read_options=read).to_table().to_pandas()
+# time travel: poprzednia wersja liczona od bieżącej (na młodym stosie tabela ma kilka
+# wersji, stała typu 120 by nie istniała); wersja 0 = stan po utworzeniu tabeli
+prev = max(dt.version() - 1, 0)
+old = DeltaTable("s3://gold/fact_order_items", version=prev, storage_options=opts).to_pyarrow_dataset(
+    parquet_read_options=read).to_table()
+agent_opts = {**opts, "AWS_ACCESS_KEY_ID": "agent", "AWS_SECRET_ACCESS_KEY": "…"}   # silver/bronze
+orders = DeltaTable("s3://silver/orders", storage_options=agent_opts)
+cdf = orders.load_cdf(starting_version=max(orders.version() - 5, 0))   # ostatnie ≤ 6 commitów
 ```
 
-**Spark (w kontenerze `spark`, np. `docker compose exec spark /opt/spark/bin/pyspark` z konfiguracją z `containers/spark/lakehouse/session.py`):**
+**Spark:** w osobnym, jednorazowym kontenerze z obrazu `wpdb/spark` (ma JAR-y Delta i S3A, konfigurację z `lakehouse/session.py` i klucze `spark` z compose). Nie w działającym kontenerze `spark`: druga JVM obok strumieni (ok. 2.6 GB z limitu 3 GB, 08 §7) groziłaby OOM-kill całego przetwarzania. `run` nie publikuje portu 4040, a `--no-deps` nie dotyka reszty stosu.
+```bash
+docker compose run --rm --no-deps --entrypoint python3 spark
+```
 ```python
+from lakehouse.config import Settings
+from lakehouse.__main__ import session
+spark = session(Settings.from_env(), app="read-back")
 spark.read.format("delta").load("s3a://gold/fact_order_items")
-spark.read.format("delta").option("versionAsOf", 120).load("s3a://gold/fact_order_items")
-spark.read.format("delta").option("readChangeFeed", "true").option("startingVersion", 10).load("s3a://silver/orders")
+from delta.tables import DeltaTable
+latest = lambda p: DeltaTable.forPath(spark, p).history(1).collect()[0]["version"]
+v = latest("s3a://gold/fact_order_items")
+spark.read.format("delta").option("versionAsOf", max(v - 1, 0)).load("s3a://gold/fact_order_items")
+s = latest("s3a://silver/orders")
+spark.read.format("delta").option("readChangeFeed", "true").option("startingVersion", max(s - 5, 0)).load("s3a://silver/orders")
 spark.sql("DESCRIBE HISTORY delta.`s3a://gold/fact_order_items`").show()
 ```
 
@@ -186,7 +209,7 @@ Dashboard również czyta przez delta-rs lub DuckDB, bez Sparka. Znaczniki czasu
 
 ## 11. Testy
 
-Status: ✅ przechodzi, ⏳ e2e: odłożone do etapu 5. Scenariusze niszczące działają na tabelach jednorazowych `s3a://gold/_it_<hex>/…` zapisywanych przez Sparka na hoście (te same wersje Delta i S3A co obraz, konto `spark`), odczyt przez delta-rs i DuckDB; prefiks jest usuwany po teście.
+Status: ✅ przechodzi (wiersze e2e: etap 5, `tests/e2e/`, 2026-10-27). Scenariusze niszczące działają na tabelach jednorazowych `s3a://gold/_it_<hex>/…` zapisywanych przez Sparka na hoście (te same wersje Delta i S3A co obraz, konto `spark`), odczyt przez delta-rs i DuckDB; prefiks jest usuwany po teście.
 
 | Poziom | Test | Oczekiwany wynik | Identyfikator | Status |
 |---|---|---|---|---|
@@ -203,8 +226,10 @@ Status: ✅ przechodzi, ⏳ e2e: odłożone do etapu 5. Scenariusze niszczące d
 | integracyjny | VACUUM | usuwa tylko pliki starsze niż retencja; time travel w oknie retencji działa | `test_delta.py::test_vacuum_removes_only_files_older_than_the_retention` | ✅ |
 | integracyjny (`slow`) | zadanie utrzymania w kontenerze | OPTIMIZE + Z-ORDER gold, VACUUM wszystkich warstw, pomiar przed/po w `ops/maintenance_log` | `test_delta.py::test_maintenance_job_runs_in_the_container_and_logs_before_after` | ✅ |
 | jednostkowy | konfiguracja sesji nie włącza `enableFastS3AListFrom` (§7) | brak ustawienia | `tests/unit/test_spark_session.py::test_fast_s3a_list_from_stays_off` | ✅ |
-| e2e | usunięcie i ponowne utworzenie kontenera Sparka | wznowienie z checkpointów w MinIO, brak duplikatów, uzgadnianie zgodne | etap 5 (`tests/e2e/`); restart z checkpointu na poziomie integracyjnym: [05-spark.md](05-spark.md) §10 | ⏳ e2e |
-| e2e (awaria) | restart MinIO w trakcie strumienia | Spark ponawia zapis; uzgadnianie zgodne | etap 5 | ⏳ e2e |
+| jednostkowy | ponowienia S3A: odrzucony zapis (507 `XMinioStorageFull`) wychodzi jako błąd paczki w ≤ 120 s, restart MinIO dalej przeczekany | budżet 30–90 s, ≥ 5 prób SDK | `tests/unit/test_spark_session.py::test_s3a_retry_budget_surfaces_a_full_minio_within_two_minutes_but_rides_out_restarts` | ✅ |
+| e2e (awaria, własny stos) | pełny dysk MinIO (tmpfs 768 MiB) | Spark nic nie zatwierdza, w ≤ 150 s loguje `XMinioStorageFull`, `unhealthy` bez restartu kontenera; po zwolnieniu miejsca wraca sam, uzgadnianie dokładne | `tests/e2e/test_minio_disk_full.py` (2 testy, [08-operations.md](08-operations.md) §12.8) | ✅ |
+| e2e | usunięcie i ponowne utworzenie kontenera Sparka | wznowienie z checkpointów w MinIO, brak duplikatów, uzgadnianie zgodne | `tests/e2e/test_pipeline.py::test_removed_and_recreated_spark_container_resumes_from_minio_checkpoints` (SIGKILL + `rm -f` + `up -d`: nowy identyfikator kontenera, ten sam `txnAppId`, dalsze numery paczek, uzgadnianie dokładne); restart z checkpointu na poziomie integracyjnym: [05-spark.md](05-spark.md) §10 | ✅ |
+| e2e (awaria) | restart MinIO w trakcie strumienia | Spark ponawia zapis; uzgadnianie zgodne | `tests/e2e/test_pipeline.py::test_restart_minio_mid_stream_spark_retries_and_reconciles` (`docker compose restart minio`), `::test_kill_minio_mid_stream_spark_retries_and_reconciles` (SIGKILL, 20 zdarzeń w czasie postoju, `up -d`); w obu MinIO ma nowy `StartedAt`, Spark wraca sam w tym samym kontenerze, checkpoint kontynuowany, uzgadnianie dokładne | ✅ |
 
 ## 12. Dystrybucja MinIO: build ze źródeł (decyzja z etapu 0)
 

@@ -28,3 +28,28 @@ def test_readers_compatible_defaults_and_s3a_for_minio():
     s3 = session.s3a_conf("http://minio:9000", "k", "s")
     assert s3["spark.hadoop.fs.s3a.path.style.access"] == "true"
     assert s3["spark.hadoop.fs.s3a.connection.ssl.enabled"] == "false"
+
+
+def _s3a_storage_error_budget_s(conf: dict[str, str]) -> tuple[float, float]:
+    """(min, max) seconds S3A retries one call that fails with a non-retryable-by-SDK
+    status such as MinIO's 507 XMinioStorageFull: hadoop-aws 3.3.4 S3ARetryPolicy ->
+    retryIdempotentCalls = exponentialBackoffRetry(retry.limit, retry.interval), sleep n
+    = interval * 2^(n+1) * U[0.5, 1.5) (RetryPolicies.calculateExponentialTime)."""
+    limit = int(conf["spark.hadoop.fs.s3a.retry.limit"])
+    interval = conf["spark.hadoop.fs.s3a.retry.interval"]
+    assert interval.endswith("s") and not interval.endswith("ms"), interval
+    base = sum(float(interval[:-1]) * 2 ** (n + 1) for n in range(limit))
+    return 0.5 * base, 1.5 * base
+
+
+def test_s3a_retry_budget_surfaces_a_full_minio_within_two_minutes_but_rides_out_restarts():
+    """08 §12.8 / 06 §11: a write MinIO rejects (507 XMinioStorageFull, retried by S3A
+    only and silently) fails the batch within 2 min, so the supervisor logs it; it was
+    ~34 min with retry.limit=10/interval=1s. A MinIO restart (connection refused: retried
+    by the SDK `attempts.maximum` times inside each of the S3A attempts) is still ridden
+    out: >= 30 s of S3A sleeps alone, plus >= 5 SDK attempts per S3A attempt."""
+    conf = session.s3a_conf("http://minio:9000", "k", "s")
+    low, high = _s3a_storage_error_budget_s(conf)
+    assert high <= 120, (low, high)
+    assert low >= 15, (low, high)
+    assert int(conf["spark.hadoop.fs.s3a.attempts.maximum"]) >= 5

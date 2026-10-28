@@ -37,10 +37,20 @@ def s3a_conf(endpoint: str, access_key: str, secret_key: str) -> dict[str, str]:
             "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
         ),
         "spark.hadoop.fs.s3a.endpoint.region": "us-east-1",
-        # MinIO restarts (06 §11 e2e): retry instead of failing the batch at once
+        # Two retry layers (hadoop-aws 3.3.4 / aws-java-sdk 1.12.262, 05 §8):
+        # - SDK (`attempts.maximum`): retries IOExceptions (MinIO restarting: connection
+        #   refused/reset) and HTTP 500/502/503/504, jittered backoff of 0.1 s .. 20 s;
+        # - S3A (`retry.limit`/`retry.interval`): around each call, exponential sleeps of
+        #   interval * 2^(n+1) * U[0.5, 1.5), WITHOUT any log line. Every other status
+        #   lands here, e.g. MinIO's 507 XMinioStorageFull (AWSS3IOException ->
+        #   retryIdempotentCalls). 10 x 1 s meant ~34 min of silent retries per write
+        #   (08 §12.8); 4 x 2 s = 4+8+16+32 s * U, i.e. 30 .. 90 s, then the batch fails,
+        #   the supervisor logs the S3 error code and restarts the query (backoff).
+        #   Connectivity still gets 5 S3A attempts x 11 SDK attempts: minutes, far longer
+        #   than a MinIO restart or kill (06 §11 e2e).
         "spark.hadoop.fs.s3a.attempts.maximum": "10",
-        "spark.hadoop.fs.s3a.retry.limit": "10",
-        "spark.hadoop.fs.s3a.retry.interval": "1s",
+        "spark.hadoop.fs.s3a.retry.limit": "4",
+        "spark.hadoop.fs.s3a.retry.interval": "2s",
         "spark.hadoop.fs.s3a.connection.establish.timeout": "5000",
         "spark.hadoop.fs.s3a.connection.timeout": "20000",
         # upload buffers on local disk (the default): "bytebuffer"/"array" reserve a
