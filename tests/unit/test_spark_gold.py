@@ -513,7 +513,8 @@ def test_quality_rules_send_bad_rows_to_quarantine_and_the_batch_goes_on(spark, 
 
 
 def test_quality_rule_predicates(spark):
-    """05 §6: each rule on its own (null counts as valid; warn rows stay in gold)."""
+    """05 §6: each rule on its own (a NULL date is valid for a warn rule; warn rows stay
+    in gold; NULL against a CHECK is covered by the parametrised test below)."""
     items = _df(
         spark,
         "order_items",
@@ -532,12 +533,22 @@ def test_quality_rule_predicates(spark):
                 "price": Decimal("-0.01"),
                 "freight_value": Decimal("0.00"),
             },
+            {  # NULL fails the CHECK freight_nonneg, so the rule rejects it too
+                "order_id": "a",
+                "order_item_id": 3,
+                "product_id": "p1",
+                "price": Decimal("1.00"),
+                "freight_value": None,
+            },
         ],
     )
     products = _df(spark, "products", [{"product_id": "p1"}])
     valid, v = quality.check_items(items, products)
     assert [r["order_item_id"] for r in valid.collect()] == [1]
-    assert [(r["rule"], r["record_key"]) for r in v.collect()] == [("price_nonneg", "a|2")]
+    assert sorted((r["rule"], r["record_key"]) for r in v.collect()) == [
+        ("freight_nonneg", "a|3"),
+        ("price_nonneg", "a|2"),
+    ]
     orders = _df(
         spark,
         "orders",
@@ -553,6 +564,76 @@ def test_quality_rule_predicates(spark):
     assert [(r["rule"], r["record_key"]) for r in quality.check_orders(orders).collect()] == [
         ("delivered_after_purchase", "x")
     ]
+
+
+RULES = (*quality.ITEM_RULES, *quality.ORDER_RULES, *quality.PAYMENT_RULES, *quality.REVIEW_RULES)
+# CHECKs on columns gold computes itself (coalesced count, sum of negatives, lead of
+# valid_from): no source value reaches them directly, so no rule guards them
+COMPUTED_CHECKS = {
+    "dim_customer.valid_range",
+    "fact_orders_lifecycle.items_nonneg",
+    "agg_revenue_hourly.corrections_nonpos",
+}
+# values probed per guarded CHECK: below, on and inside the bound, and NULL
+CHECK_PROBES = {
+    "fact_order_items.price_nonneg": ("price", (Decimal("-0.01"), Decimal("0"), None)),
+    "fact_order_items.freight_nonneg": ("freight_value", (Decimal("-1"), Decimal("2.5"), None)),
+    "fact_reviews.score_range": ("review_score", (0, 1, 5, 6, None)),
+}
+
+
+def test_every_gold_check_is_guarded_by_a_reject_rule_with_the_same_expression():
+    """06 §6 / 05 §6: each gold CHECK on a source column has a reject rule with the very
+    same expression (and a probe below); the others are on columns gold computes."""
+    from lakehouse.tables import GOLD
+
+    checks = {f"{t}.{c}": e for t, spec in GOLD.items() for c, e in spec.constraints.items()}
+    guarded = {r.guards: r for r in RULES if r.guards}
+    assert set(checks) == set(guarded) | COMPUTED_CHECKS
+    assert set(guarded) == set(CHECK_PROBES)
+    for name, rule in guarded.items():
+        assert (rule.severity, rule.ok) == ("reject", checks[name])
+
+
+@pytest.mark.parametrize("check", sorted(CHECK_PROBES))
+def test_reject_rule_rejects_exactly_the_rows_its_check_rejects_including_null(
+    spark, tmp_path, check
+):
+    """Delta fails a CHECK that evaluates to NULL; the guarding rule must quarantine the
+    same rows (NULL included), so the CHECK never fires and the gold batch goes on."""
+    from lakehouse.tables import GOLD
+
+    table, constraint = check.split(".")
+    spec = GOLD[table]
+    rule = next(r for r in RULES if r.guards == check)
+    column, values = CHECK_PROBES[check]
+    path = f"{tmp_path}/{table}"
+    delta_io.ensure_table(
+        spark, path, spec.schema, constraints={constraint: spec.constraints[constraint]}
+    )
+    types = {f.name: f.dataType.simpleString() for f in spec.schema}
+    rows = []
+    for i, value in enumerate(values):
+        keys = {k: i if types[k] == "int" else f"k{i}" for k in rule.keys}
+        row = dict.fromkeys(types) | keys | {column: value}
+        rows.append(tuple(row[c] for c in types))
+    df = spark.createDataFrame(rows, spec.schema)
+    key = F.concat_ws("|", *[F.col(k).cast("string") for k in rule.keys])
+    check_rejects = set()
+    for r in df.select(key.alias("k")).collect():
+        one = df.filter(key == r["k"])
+        try:
+            one.write.format("delta").mode("append").save(path)
+        except Exception as e:  # noqa: BLE001 - Delta raises a JVM-wrapped error
+            assert "check constraint" in str(e).lower(), e
+            check_rejects.add(r["k"])
+    assert None in values and check_rejects  # the probe covers NULL and a real violation
+    rule_rejects = {r["record_key"] for r in quality.violations(df, rule).collect()}
+    assert rule_rejects == check_rejects
+    passed = {r["k"] for r in df.filter(quality.passes(rule)).select(key.alias("k")).collect()}
+    assert passed == {
+        r["k"] for r in spark.read.format("delta").load(path).select(key.alias("k")).collect()
+    }
 
 
 @pytest.mark.slow

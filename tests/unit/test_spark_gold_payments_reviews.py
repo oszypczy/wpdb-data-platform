@@ -274,31 +274,6 @@ def test_payments_and_reviews_follow_silver_deletes_late_orders_and_replays(spar
     assert set(_read(spark, lake, "fact_reviews", ["review_id", "order_id"])) == {("rA", "o1")}
 
 
-def test_review_score_rule_matches_the_check_constraint(spark, tmp_path):
-    """06 §6: CHECK score_range on gold/fact_reviews rejects a score outside 1..5 and a
-    NULL score (Delta fails a CHECK that evaluates to NULL); the reject rule
-    review_score_range keeps exactly those rows out of gold, so the CHECK never fires."""
-    from lakehouse.tables import GOLD
-
-    spec = GOLD["fact_reviews"]
-    path = f"{tmp_path}/fact_reviews"
-    delta_io.ensure_table(spark, path, spec.schema, constraints=spec.constraints)
-    cols = [f.name for f in spec.schema]
-    for score in (0, 6, None):
-        row = dict.fromkeys(cols) | {"review_id": "r", "order_id": "o", "review_score": score}
-        df = spark.createDataFrame([tuple(row[c] for c in cols)], spec.schema)
-        with pytest.raises(Exception, match="(?i)check constraint"):
-            df.write.format("delta").mode("append").save(path)
-    reviews = _df(
-        spark,
-        "order_reviews",
-        [{"review_id": f"r{s}", "order_id": "o", "review_score": s} for s in (0, 1, 5, 6, None)],
-    )
-    valid, v = quality.check_reviews(reviews)
-    assert sorted(r["review_score"] for r in valid.collect()) == [1, 5]
-    assert sorted(r["record_key"] for r in v.collect()) == ["r0|o", "r6|o", "rNone|o"]
-
-
 # --------------------------------------------------------------------------- backfill
 @pytest.mark.slow
 def test_new_gold_source_clears_the_checkpoint_and_backfills_from_silver(spark, tmp_path):

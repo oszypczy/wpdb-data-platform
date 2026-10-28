@@ -5,6 +5,11 @@ Each rule returns the violating rows in the quarantine shape
 row out of gold (the CHECK constraints of 06 §6 are the last line of defence behind
 these rules); ``warn`` lets it through and only reports it. Real Olist examples: 9
 payments of value 0 and 3 payments of type ``not_defined`` (01 §6).
+
+A reject rule that guards a gold CHECK (``guards``) uses the CHECK's own expression and
+treats NULL the way Delta does: a CHECK that evaluates to NULL fails the write, so a
+NULL there is a violation (quarantine), not a valid row; otherwise one such row would
+fail the whole silver_to_gold batch. Every other rule counts NULL as valid.
 """
 
 from __future__ import annotations
@@ -21,17 +26,28 @@ class Rule:
     severity: str  # reject | warn
     table: str
     keys: tuple[str, ...]
-    ok: str  # SQL predicate that a valid row satisfies (null counts as valid)
+    ok: str  # SQL predicate that a valid row satisfies
+    # "<gold table>.<constraint>" when the rule keeps rows out of a CHECK: ok is then
+    # the CHECK expression and NULL is a violation (as in Delta); else NULL is valid
+    guards: str | None = None
 
 
 ITEM_RULES = (
-    Rule("price_nonneg", "reject", "order_items", ("order_id", "order_item_id"), "price >= 0"),
+    Rule(
+        "price_nonneg",
+        "reject",
+        "order_items",
+        ("order_id", "order_item_id"),
+        "price >= 0",
+        guards="fact_order_items.price_nonneg",
+    ),
     Rule(
         "freight_nonneg",
         "reject",
         "order_items",
         ("order_id", "order_item_id"),
         "freight_value >= 0",
+        guards="fact_order_items.freight_nonneg",
     ),
 )
 ORDER_RULES = (
@@ -67,14 +83,13 @@ PAYMENT_RULES = (
     ),
 )
 REVIEW_RULES = (
-    # the CHECK score_range of gold/fact_reviews (06 §6) is the last line of defence;
-    # Delta's CHECK fails on NULL, so here a missing score is a violation too
     Rule(
         "review_score_range",
         "reject",
         "order_reviews",
         ("review_id", "order_id"),
-        "coalesce(review_score BETWEEN 1 AND 5, false)",
+        "review_score BETWEEN 1 AND 5",
+        guards="fact_reviews.score_range",
     ),
 )
 PRODUCT_EXISTS = Rule(
@@ -91,8 +106,13 @@ def _payload(df: DataFrame) -> Column:
     return F.to_json(F.struct(*cols))
 
 
+def passes(rule: Rule) -> Column:
+    """True for a row the rule accepts; NULL of ``ok`` is resolved like the CHECK."""
+    return F.coalesce(F.expr(rule.ok), F.lit(rule.guards is None))
+
+
 def violations(df: DataFrame, rule: Rule) -> DataFrame:
-    bad = df.filter(~F.coalesce(F.expr(rule.ok), F.lit(True)))
+    bad = df.filter(~passes(rule))
     return bad.select(
         F.lit(rule.name).alias("rule"),
         F.lit(rule.severity).alias("severity"),
@@ -141,6 +161,5 @@ def check_payments(payments: DataFrame) -> DataFrame:
 def check_reviews(reviews: DataFrame) -> tuple[DataFrame, DataFrame]:
     """(valid reviews, violations): a score outside 1..5 is kept out of gold."""
     v = check(reviews, REVIEW_RULES)
-    rule = REVIEW_RULES[0]
-    valid = reviews.filter(F.coalesce(F.expr(rule.ok), F.lit(True)))
+    valid = reviews.filter(passes(REVIEW_RULES[0]))
     return valid, v
