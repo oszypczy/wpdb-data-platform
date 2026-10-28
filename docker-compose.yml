@@ -56,6 +56,9 @@ services:
     image: confluentinc/cp-kafka:8.3.2
     container_name: kafka
     restart: unless-stopped
+    # tini as PID 1 reaps orphaned healthcheck/CLI processes; without it the broker
+    # JVM is PID 1 and never reaps them (QA F2: 125 defunct java processes, 08 §3)
+    init: true
     environment:
       # KRaft, single node acting as broker and controller
       KAFKA_NODE_ID: 1
@@ -85,9 +88,12 @@ services:
       - "127.0.0.1:9092:9092"
     volumes:
       - kafka_data:/var/lib/kafka/data
+      - ./containers/kafka/healthcheck.py:/usr/local/bin/kafka-healthcheck.py:ro
     healthcheck:
       <<: *hc
-      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:29092 --list >/dev/null 2>&1"]
+      # no JVM: one Kafka-protocol ApiVersions request to kafka:29092 (python3 stdlib,
+      # ~60 ms); kafka-topics --list took 6 s idle and 17-28 s under Spark load (08 §3)
+      test: ["CMD", "python3", "/usr/local/bin/kafka-healthcheck.py"]
       start_period: 60s
     deploy:
       resources:

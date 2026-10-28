@@ -10,7 +10,7 @@ argument-hint: "[up|down|reset|logs <service>|wait]"
 | Service | Container/host | Internal | Host port | Healthcheck |
 |---|---|---|---|---|
 | `postgres` | `postgres` | 5432 | 127.0.0.1:5432 | `pg_isready -U postgres -d shop` |
-| `kafka` | `kafka` | `kafka:29092` | `127.0.0.1:9092` (advertised as `localhost:9092`) | `kafka-topics --bootstrap-server kafka:29092 --list` |
+| `kafka` | `kafka` | `kafka:29092` | `127.0.0.1:9092` (advertised as `localhost:9092`) | `python3 /usr/local/bin/kafka-healthcheck.py`: one Kafka-protocol `ApiVersions` request to `kafka:29092`, no JVM (~0.06 s); `init: true` reaps orphans (08 §3) |
 | `schema-registry` | `schema-registry` | 8081 | 127.0.0.1:8081 | `GET :8081/subjects` (python3 `urllib`; the image has no curl) |
 | `connect` | `connect` | 8083 | 127.0.0.1:8083 | `curl -f :8083/connectors` |
 | `minio` | `minio` | 9000 (API), 9001 (console) | 127.0.0.1:9000 / 127.0.0.1:9091 (console) | `curl -f :9000/minio/health/live` |

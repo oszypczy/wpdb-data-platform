@@ -294,3 +294,20 @@ def test_dashboard_image_pins_its_dependencies_and_vendors_the_geojson():
     assert len(geo["features"]) == 27
     assert {f["id"] for f in geo["features"]} >= {"SP", "RJ", "MG", "DF", "AC"}
     assert "public domain" in (d / "assets" / "README.md").read_text()
+
+
+def test_kafka_healthcheck_starts_no_jvm_and_init_reaps_orphans():
+    """08 §3 (QA F2): the Kafka healthcheck is a Kafka-protocol ApiVersions probe in
+    python3, not a JVM CLI (kafka-topics took 6 s idle, 17-28 s under Spark load, more
+    than the 5 s timeout), and tini (init: true) is PID 1 so orphaned processes are reaped."""
+    doc = yaml.safe_load(COMPOSE.read_text())
+    svc = doc["services"]["kafka"]
+    assert svc.get("init") is True, "kafka: init: true (the broker JVM as PID 1 never reaps)"
+    test = svc["healthcheck"]["test"]
+    assert test == ["CMD", "python3", "/usr/local/bin/kafka-healthcheck.py"], test
+    joined = " ".join(test)
+    for jvm_tool in ("kafka-topics", "kafka-broker-api-versions", "kafka-run-class", "java"):
+        assert jvm_tool not in joined, f"kafka healthcheck starts a JVM: {jvm_tool}"
+    mount = "./containers/kafka/healthcheck.py:/usr/local/bin/kafka-healthcheck.py:ro"
+    assert mount in svc["volumes"]
+    assert (CONTAINERS / "kafka" / "healthcheck.py").exists()
