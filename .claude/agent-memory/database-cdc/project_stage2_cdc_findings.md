@@ -1,6 +1,6 @@
 ---
 name: stage2-cdc-findings
-description: Non-obvious Debezium/Kafka/registry behaviours (dropped-table hazard, txId:lsn ids, registry id reuse, cryptography SIGILL, idle-stack slot-ahead-of-offset fix, tests write only probe_shop tables)
+description: Non-obvious Debezium/Kafka/registry behaviours (dropped-table hazard, txId:lsn ids, registry id reuse, cryptography SIGILL, idle-stack slot-ahead-of-offset fix, tests write only probe_shop tables, compose run -T cancel orphans the consumer)
 metadata:
   type: project
 ---
@@ -42,3 +42,13 @@ Added 2026-10-26 (fix round after stage 4):
   Probe orders go to session tables `shop.zz_probe_<hex>_<table>` (fixture `probe_shop`);
   the consumer maps them to their role via `rules.table_role`. Exceptions that remain:
   evolution test (DDL + no-op UPDATE on shop.orders), compaction test (no-op UPDATE items).
+
+Added 2026-10-27 (stage 5 QA finding "consumer prints nothing without a TTY"):
+- Not reproducible: `emit` flushed every line since stage 2. The real defects/pitfalls were
+  (a) `| head` → BrokenPipeError traceback (fixed in `Runner.emit`), (b) cancelling the
+  `docker compose run -T` *client* (timeout/kill/broken host pipe) does NOT signal the
+  container: the final SUMMARY is lost and `wpdb-consumer-run-<id>` keeps consuming in the
+  background. **How to apply:** reproduce a QA claim before "fixing" it; after ad-hoc
+  `compose run -T` experiments, list `label=com.docker.compose.service=consumer` and stop
+  orphans; for tests use `--no-deps` (plain `compose run consumer` re-runs `kafka-init`) and
+  bounded runs (`--until-end`/`--max-messages`).

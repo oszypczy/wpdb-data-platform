@@ -146,12 +146,26 @@ class Runner:
         self.clock: datetime | None = None
         self.violations: list[tuple[Message, rules.Violation]] = []
         self.stop = False
+        self.stdout_closed = False
         self.decode_errors = 0
         self.at_eof: set[tuple[str, int]] = set()
 
     # -- output ---------------------------------------------------------------------------
     def emit(self, text: str) -> None:
-        print(text, flush=True)
+        """One line to stdout, flushed at once: a pipe or `docker compose run -T` sees every
+        line (and every --stats block) when it is printed, not when the process exits."""
+        if self.stdout_closed:
+            return
+        try:
+            print(text, flush=True)
+        except BrokenPipeError:
+            # the reader went away (`| head -n 5`): stop like on SIGTERM, close the Kafka
+            # consumer cleanly and send the rest (incl. the interpreter's last flush) nowhere
+            self.stdout_closed = True
+            self.stop = True
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            os.close(devnull)
 
     def emit_event(self, msg: Message, violations: list[rules.Violation]) -> None:
         if self.args.json:
