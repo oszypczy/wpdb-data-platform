@@ -2,7 +2,7 @@
 
 Ten dokument opisuje, jak cały system wstaje jednym `docker compose up`, jak się zachowuje przy awariach, jak go resetować i jak uruchamiać testy. Właściciel: `platform-devops` (razem z `qa-engineer` dla sekcji o testach). Kontrakt nazw usług i portów jest w skillu `stack-ops` (`.claude/skills/stack-ops/SKILL.md`); ten dokument i skill zmieniają się razem.
 
-Stan: **etap 0 ukończony 2026-10-20** (infrastruktura: Postgres, Kafka, Schema Registry, Connect, MinIO, kontenery startowe, harness testów, CI); **etap 1 (symulator + PostgreSQL) zaimplementowany 2026-10-20**, usługa `simulator` startuje domyślnie; **etap 2 (Debezium + Kafka + Schema Registry + consumer) zaimplementowany 2026-10-20**: konektor `olist-postgres` rejestrowany po preloadzie, tematy `olist.*` z `topic.creation`, usługa `consumer` w profilu `tools`. **Etap 3 (Spark + MinIO/Delta) zaimplementowany 2026-10-23**: usługa `spark` startuje domyślnie po `connect-init` i `minio-init`. **Etap 4 (dashboard Streamlit) zaimplementowany 2026-10-24**: usługa `dashboard` startuje domyślnie po `minio-init` (bez zależności od Sparka). Sekcje dotyczące dalszego potoku (Spark, dashboard, testy e2e z awariami) są uzupełniane w kolejnych etapach.
+Stan: **etap 0 ukończony 2026-10-20** (infrastruktura: Postgres, Kafka, Schema Registry, Connect, MinIO, kontenery startowe, harness testów, CI); **etap 1 (symulator + PostgreSQL) zaimplementowany 2026-10-20**, usługa `simulator` startuje domyślnie; **etap 2 (Debezium + Kafka + Schema Registry + consumer) zaimplementowany 2026-10-20**: konektor `olist-postgres` rejestrowany po preloadzie, tematy `olist.*` z `topic.creation`, usługa `consumer` w profilu `tools`. **Etap 3 (Spark + MinIO/Delta) zaimplementowany 2026-10-23**: usługa `spark` startuje domyślnie po `connect-init` i `minio-init`. **Etap 4 (dashboard Streamlit) zaimplementowany 2026-10-24**: usługa `dashboard` startuje domyślnie po `minio-init` (bez zależności od Sparka). **Etap 5:** instrukcja wdrożenia (§12, 2026-10-27); testy e2e z awariami i uzgadnianiem (§9, §10, `tests/e2e/`, 2026-10-27).
 
 ## 1. Macierz wersji
 
@@ -54,7 +54,7 @@ kafka + schema-registry + minio-init + connect-init ──► spark        minio
 
 | Krok | Usługa | Czeka na | Healthy, gdy |
 |---|---|---|---|
-| 1 | `postgres`, `kafka`, `minio` | nic | `pg_isready`; `kafka-topics --list`; `GET /minio/health/live` |
+| 1 | `postgres`, `kafka`, `minio` | nic | `pg_isready`; żądanie `ApiVersions` do `kafka:29092` (§3); `GET /minio/health/live` |
 | 2 | `kafka-init` | `kafka` healthy | exit 0 po `kafka-topics --create --if-not-exists` z `containers/kafka/topics.txt` |
 | 2 | `minio-init` | `minio` healthy | exit 0 po kubełkach, politykach, kontach |
 | 3 | `schema-registry` | `kafka` healthy, `kafka-init` exit 0 | `GET /subjects` |
@@ -91,12 +91,12 @@ Tabela jest kopią kontraktu ze skillu `stack-ops`; wszystkie healthchecki mają
 | Usługa | Wewnątrz sieci | Port hosta | Healthcheck |
 |---|---|---|---|
 | `postgres` | `postgres:5432` | `127.0.0.1:5432` | `pg_isready -U postgres -d shop` |
-| `kafka` | `kafka:29092` | `127.0.0.1:9092` (advertised `localhost:9092`) | `kafka-topics --bootstrap-server kafka:29092 --list` |
+| `kafka` | `kafka:29092` | `127.0.0.1:9092` (advertised `localhost:9092`) | `python3 /usr/local/bin/kafka-healthcheck.py` (z `containers/kafka/healthcheck.py`): jedno żądanie protokołu Kafki `ApiVersions` v0 na `kafka:29092`, wymagane `error_code=0` i obecne API `Produce`/`Metadata`; bez JVM, ok. 0,06 s; `init: true` (poniżej) |
 | `schema-registry` | `schema-registry:8081` | `127.0.0.1:8081` | `GET :8081/subjects` przez `python3 -c "urllib.request.urlopen(...)"` (obraz `cp-schema-registry` nie ma `curl`; `urlopen` rzuca wyjątek przy HTTP ≥ 400, jak `curl -f`) |
 | `connect` | `connect:8083` | `127.0.0.1:8083` | `curl -sf :8083/connectors` |
 | `minio` | `minio:9000` (API), `minio:9001` (konsola) | `127.0.0.1:9000`, `127.0.0.1:9091` | `curl -sf :9000/minio/health/live` |
 | `simulator` | – | – | `python /app/healthcheck.py`: heartbeat `/tmp/simulator/heartbeat` < 30 s i faza `replay`/`done` (01 §5); `start_period` 120 s |
-| `spark` (etap 3) | – | `127.0.0.1:4040` (Spark UI) | `python3 /app/healthcheck.py`: plik `/tmp/spark/health.json` pisany przez pętlę sterownika ma < 60 s i status `ok` (zapytanie `kafka_to_bronze` i każde już uruchomione zapytanie aktywne); `start_period` 120 s |
+| `spark` (etap 3) | – | `127.0.0.1:4040` (Spark UI) | `python3 /app/healthcheck.py`: plik `/tmp/spark/health.json` pisany przez pętlę sterownika ma < 60 s i status `ok` (zapytanie `kafka_to_bronze` i każde już uruchomione zapytanie aktywne i żadne nie jest `recovering`, czyli nie padło w ostatnich 5 min bez ukończonego od tego czasu triggera, §12.8); `start_period` 120 s |
 | `dashboard` (etap 4) | – | `127.0.0.1:8501` | `python /app/healthcheck.py`: `GET :8501/_stcore/health` przez `urllib` (obraz `python:slim` nie ma `curl`; wyjątek przy HTTP ≥ 400 = kod 1); niezależny od danych; `start_period` 30 s |
 | `kafka-init`, `minio-init`, `connect-init` | – | – | kod wyjścia 0 |
 
@@ -105,6 +105,17 @@ Skrypt `.claude/skills/stack-ops/scripts/wait-healthy.sh [timeout]` blokuje, aż
 **Wszystkie porty hosta są publikowane tylko na `127.0.0.1`** (wynik przeglądu bezpieczeństwa etapu 0). Stos jest laboratorium na jednej maszynie; bez tego ograniczenia każdy w sieci lokalnej mógłby przez REST Connecta (`:8083`) zarejestrować konektor i, dzięki `config.providers=env`, odczytać `DEBEZIUM_DB_PASSWORD`, a przez `:5432`/`:9092` czytać bazę i tematy. Listener `EXTERNAL` Kafki i tak ogłasza `localhost:9092`, więc nic poza adresem wiązania się nie zmienia. Test: `test_compose_file.py::test_all_published_ports_bound_to_loopback`.
 
 **`connector.client.config.override.policy=All`** zostaje świadomie: [04-kafka.md](04-kafka.md) §7 wymaga w konektorze `producer.override.acks=all`, `producer.override.enable.idempotence=true` i `producer.override.compression.type=zstd`; polityka `Principal` dopuszcza tylko nadpisania związane z uwierzytelnianiem (`sasl.*`, `security.protocol`), więc blokowałaby te ustawienia. Ryzyko (nadpisania klienta przez osobę rejestrującą konektor) jest zneutralizowane przez wiązanie REST do loopback.
+
+**Healthcheck Kafki bez JVM (poprawka etapu 5, ustalenie QA F2).** Wcześniej był to `kafka-topics --bootstrap-server kafka:29092 --list`. To narzędzie uruchamia pełną JVM i dziedziczy po brokerze `KAFKA_HEAP_OPTS=-Xms512m -Xmx1g`, więc w kontenerze z limitem 1536 MiB obok brokera z `-Xmx1g` trwało 3–6 s bez obciążenia i 17–28 s, gdy Spark zajmował 570–670 % CPU, czyli dłużej niż `timeout: 5s`. Kafka była `unhealthy` ponad 15 min, choć broker działał, a `docker compose up -d`/`make up` kończyły się „dependency failed to start: container kafka is unhealthy”. Do tego PID 1 był JVM brokera, który nie zbiera osieroconych procesów: przerwane sprawdzenia zostawiały procesy `java <defunct>` (QA: 125; 89 po 28 min i 93 po 16 h bez obciążenia). Rozważone warianty:
+
+| Wariant | Ocena |
+|---|---|
+| goły TCP (`exec 3<>/dev/tcp/kafka/29092`, 0,03–0,15 s) | tani, ale mówi tylko „port otwarty”: serwer gniazd Kafki wiąże akceptory, zanim włączy obsługę żądań, więc połączenie TCP udaje się, gdy broker jeszcze nie obsługuje klientów; listener kontrolera `9093` też by przeszedł |
+| `kafka-broker-api-versions`/`kafka-topics` z małą stertą (`KAFKA_HEAP_OPTS=-Xmx64m`, `-XX:TieredStopAtLevel=1`) i dłuższym timeoutem | nadal start JVM i ładowanie klasy klienta (sekundy pod obciążeniem); dłuższy timeout wydłuża tylko wykrywanie awarii, nie usuwa przyczyny |
+| **wybrane:** `python3` (3.9 z obrazu `cp-kafka`) wysyła `ApiVersions` v0 (to samo pierwsze żądanie, które robi każdy klient i `kafka-broker-api-versions`), sprawdza `correlation_id`, `error_code=0` i obecność `Produce`(0) i `Metadata`(3) | odpowiedź przychodzi z wątków obsługi żądań brokera, więc znaczy „broker przyjmuje żądania klientów”; listener kontrolera odpowiada bez `Produce`, więc jest odrzucany (sprawdzone na `9093`); sama biblioteka standardowa, jedno gniazdo, timeout 4 s < 5 s |
+| `init: true` | dodatkowo: PID 1 to `docker-init` (tini), który zbiera osierocone procesy i przekazuje sygnały brokerowi |
+
+Pomiary 2026-10-28 (arm64, 8 CPU VM): nowe sprawdzenie 0,06–0,07 s bez obciążenia, 0,11–0,31 s przy sztucznym obciążeniu 640–790 % CPU (pętle w kontenerze `postgres`); stare `kafka-topics --list` w tych samych warunkach 3,1 s i 1,8–3,0 s. Kafka po `docker compose up -d --no-deps kafka` `healthy` po 7 s (pierwsze sprawdzenie), `connect`, `schema-registry` i `spark` zostały `healthy`, konektor `RUNNING`. Po ręcznych wywołaniach `kafka-topics` z `init: true`: 0 procesów zombie. `connect` (`curl`) i `schema-registry` (`python3 urllib`) nie mają tego problemu: ich sprawdzenie to jeden krótki proces uruchamiany wprost przez `docker exec`, po 16 h było w nich 0 procesów zombie, więc nie dostały `init`. Testy: `tests/unit/test_compose_file.py::test_kafka_healthcheck_starts_no_jvm_and_init_reaps_orphans`, `tests/unit/test_kafka_healthcheck.py` (fałszywy broker na gnieździe: poprawne żądanie, odrzucenie błędu, złego `correlation_id`, zamkniętego połączenia, braku `Produce`/`Metadata`).
 
 Dwa listenery Kafki (naprawa błędu z tutoriali): `INTERNAL://kafka:29092` dla kontenerów, `EXTERNAL://localhost:9092` dla hosta, `CONTROLLER://kafka:9093` dla KRaft. Test: `test_kafka.py::test_reachable_from_host`, `::test_reachable_from_container`.
 
@@ -124,13 +135,13 @@ Usługi długotrwałe mają `restart: unless-stopped`; kontenery startowe mają 
 
 | Umiera | Co się dzieje | Kto wznawia | Test (etap) |
 |---|---|---|---|
-| `postgres` | symulator traci połączenie, Debezium traci slot; WAL i slot są w `pg_data` | Docker restartuje; symulator wznawia od `sim.sim_state` (01 §6), Debezium łączy się ponownie i czyta od `confirmed_flush_lsn` | e2e, etap 6 |
-| `kafka` | Connect i Spark dostają błędy producenta/konsumenta i ponawiają; log jest w `kafka_data`, `CLUSTER_ID` stały, więc broker wstaje na tych samych danych | Docker restartuje; Debezium wznawia z `connect-offsets`, Spark z checkpointu | e2e „kill brokera” (04 §8), etap 6 |
-| `schema-registry` | rejestr jest bezstanowy: schematy są w temacie `_schemas` | Docker restartuje; klienci (konwerter, Spark) ponawiają żądania HTTP | e2e, etap 6 |
-| `connect` | zdarzenia nie płyną; slot w Postgresie trzyma WAL (limit `max_slot_wal_keep_size=2GB`) | Docker restartuje; Debezium wznawia od offsetu z `connect-offsets` (zapis co 5 s, `OFFSET_FLUSH_INTERVAL_MS=5000`, więc do ok. 5 s zdarzeń przychodzi ponownie), slot się domyka; dostarczanie co najmniej raz + idempotentny MERGE w Sparku | e2e „kill connect” (03 §11), etap 6; restart samego zadania po `FAILED`: integracyjny `test_debezium.py::test_incompatible_type_change_is_rejected_and_the_connector_fails_then_recovers` ✅ |
-| `minio` | Spark nie może zapisać; ponawia (S3A retry); dane w `minio_data` | Docker restartuje | e2e „restart MinIO” (06 §11), etap 6 |
-| `spark` | przetwarzanie staje; checkpointy w kubełku `checkpoints`, więc kontener jest bezstanowy | Docker restartuje; strumienie wznawiają z checkpointów; pojedyncze zapytanie, które padło (np. zmiana schematu źródła Delta), wznawia pętla sterownika bez restartu kontenera (05 §12) | integracyjny: `test_spark.py::test_restart_from_checkpoint_keeps_bronze_offsets_unique` ✅ (restart), `::test_add_column_reaches_silver_without_restart` ✅; e2e z `kill` i uzgadnianiem: etap 5 |
-| `simulator` | brak nowych zdarzeń; kursor w `sim.sim_state` zapisany w tej samej transakcji co dane | `docker compose up -d simulator`; wznowienie od kursora bez duplikatów i strat (01 §5) | integracyjny: `test_simulator.py::test_kill_and_restart_resumes_from_sim_state_without_duplicates` ✅; e2e z uzgadnianiem silver: etap 6 |
+| `postgres` | symulator traci połączenie, Debezium traci slot; WAL i slot są w `pg_data` | Docker restartuje; symulator wznawia od `sim.sim_state` (01 §6), Debezium łączy się ponownie i czyta od `confirmed_flush_lsn` | e2e ✅ (etap 5): `tests/e2e/test_pipeline.py::test_kill_postgres_mid_stream_simulator_and_debezium_reconnect_without_loss` (symulator łączy się ponownie bez restartu kontenera, konektor `RUNNING`, uzgadnianie dokładne) |
+| `kafka` | Connect i Spark dostają błędy producenta/konsumenta i ponawiają; log jest w `kafka_data`, `CLUSTER_ID` stały, więc broker wstaje na tych samych danych | Docker restartuje; Debezium wznawia z `connect-offsets`, Spark z checkpointu | e2e ✅ (etap 5): `tests/e2e/test_pipeline.py::test_kill_kafka_mid_stream_debezium_and_spark_resume_without_loss_or_duplicates` (04 §8) |
+| `schema-registry` | rejestr jest bezstanowy: schematy są w temacie `_schemas` | Docker restartuje; klienci (konwerter, Spark) ponawiają żądania HTTP | e2e ✅ (etap 5): `tests/e2e/test_pipeline.py::test_kill_schema_registry_mid_stream_clients_retry_without_loss_or_duplicates` |
+| `connect` | zdarzenia nie płyną; slot w Postgresie trzyma WAL (limit `max_slot_wal_keep_size=2GB`) | Docker restartuje; Debezium wznawia od offsetu z `connect-offsets` (zapis co 5 s, `OFFSET_FLUSH_INTERVAL_MS=5000`, więc do ok. 5 s zdarzeń przychodzi ponownie), slot się domyka; dostarczanie co najmniej raz + idempotentny MERGE w Sparku | e2e ✅ (etap 5): `tests/e2e/test_pipeline.py::test_kill_connect_mid_stream_resumes_from_its_offset_without_loss_or_duplicates` (03 §11); restart samego zadania po `FAILED`: integracyjny `test_debezium.py::test_incompatible_type_change_is_rejected_and_the_connector_fails_then_recovers` ✅ |
+| `minio` | Spark nie może zapisać; ponawia (S3A retry); dane w `minio_data` | Docker restartuje | e2e ✅ (etap 5): `tests/e2e/test_pipeline.py::test_restart_minio_mid_stream_spark_retries_and_reconciles`, `::test_kill_minio_mid_stream_spark_retries_and_reconciles` (06 §11; Spark wraca bez restartu kontenera); pełny dysk: `tests/e2e/test_minio_disk_full.py` (§12.8) |
+| `spark` | przetwarzanie staje; checkpointy w kubełku `checkpoints`, więc kontener jest bezstanowy | Docker restartuje; strumienie wznawiają z checkpointów; pojedyncze zapytanie, które padło (np. zmiana schematu źródła Delta), wznawia pętla sterownika bez restartu kontenera (05 §12) | integracyjny: `test_spark.py::test_restart_from_checkpoint_keeps_bronze_offsets_unique` ✅ (restart), `::test_add_column_reaches_silver_without_restart` ✅; e2e ✅ (etap 5): `tests/e2e/test_pipeline.py::test_kill_spark_mid_stream_resumes_from_checkpoints_and_reconciles`, `::test_removed_and_recreated_spark_container_resumes_from_minio_checkpoints`; samoczynny restart przez Dockera po upadku procesu sterownika (bez `compose up`): `tests/integration/test_stack.py::test_crashed_long_running_container_is_restarted_by_docker` ✅ |
+| `simulator` | brak nowych zdarzeń; kursor w `sim.sim_state` zapisany w tej samej transakcji co dane | `docker compose up -d simulator`; wznowienie od kursora bez duplikatów i strat (01 §5) | integracyjny: `test_simulator.py::test_kill_and_restart_resumes_from_sim_state_without_duplicates` ✅; e2e ✅ (etap 5) z uzgadnianiem silver: `tests/e2e/test_pipeline.py::test_kill_simulator_mid_stream_resumes_from_its_cursor_and_silver_reconciles` |
 | kontener startowy (kod ≠ 0) | `depends_on … service_completed_successfully` blokuje zależne usługi; `wait-healthy.sh` kończy się `FAILED: <nazwa> exited <kod>` | człowiek: `docker compose logs <nazwa>`, poprawka, `--force-recreate --no-deps` | integracyjny (idempotencja) |
 
 Ograniczenia zasobów (`deploy.resources.limits.memory`) chronią maszynę przed jednym kontenerem, który zjada całą pamięć; po przekroczeniu limitu kontener dostaje OOM-kill i `restart` go podnosi.
@@ -184,9 +195,9 @@ Trzy poziomy, markery `pytest` w `pyproject.toml` (`--strict-markers`), skill `r
 |---|---|---|---|---|
 | jednostkowy | `unit` | nic (bez Dockera) | `make test-unit` | sekundy |
 | integracyjny | `integration` | kontenery, które fixture `stack` uruchamia (`docker compose up -d` + wait-healthy; **nie** zatrzymuje stosu po testach) | `make test-integration` = zestaw szybki (`-m "integration and not slow"`, na działającym stosie, przy każdej zmianie); `make test-integration-full` = wszystkie testy integracyjne (także `slow`) na działającym stosie; `make test-integration-fresh` = wszystkie od pustych wolumenów (`WPDB_FRESH=1`, włącza test budżetu startu) | etap 3: ok. 5–11 min (szybki, zależnie od wieku stosu, §2.1) / ok. 17 min (pełny) |
-| e2e | `e2e` (+ `slow`) | pełny, świeży stos (`WPDB_FRESH=1` → `down -v` przed startem), wstrzykiwanie awarii | `make test-e2e` | dziesiątki minut |
+| e2e | `e2e` (+ `slow`) | pełne, świeże stosy (każdy moduł `tests/e2e/` stawia własny przez `down -v` + `up -d --build` z nadpisaniem okna `SIM_START`/`SIM_END`, opcjonalnie z dodatkowym plikiem compose), wstrzykiwanie awarii; na końcu sesji stos domyślny od zera i healthy (jak `make reset && make up`; `WPDB_E2E_KEEP=1` zostawia ostatni stos e2e) | `make test-e2e` | ok. 1 h (3 stosy: pełny dysk MinIO ok. 9 min, potok z awariami ok. 30 min, okno symulatora ok. 10 min, plus start każdego stosu i przywrócenie domyślnego) |
 
-Narzędzia na hoście: `uv` (Python 3.12 z `.python-version`, `make sync`), Docker Desktop. `psql` i `mc` nie są potrzebne: testy używają `psycopg`, `confluent-kafka`, `boto3`, `requests` i `docker compose exec`.
+Narzędzia na hoście: `uv` (Python 3.12 z `.python-version`, `make sync`), Docker Desktop, JDK 17 (testy jednostkowe Sparka). `psql` i `mc` nie są potrzebne: testy używają `psycopg`, `confluent-kafka`, `boto3`, `requests` i `docker compose exec`.
 
 Fixture'y (`tests/conftest.py`): `settings` (`.env` przez `python-dotenv`), `compose`/`stack` (`tests/helpers/compose.py::ComposeStack`: `up`, `down`, `wait_healthy`, `rerun_init`, `exec`, `kill`, `logs`), `pg_reader`/`pg_app`/`pg_debezium` (psycopg, autocommit), `kafka_admin`, `schema_registry`/`connect` (`Http` nad `requests`), `minio(konto)` (boto3, path-style, `localhost:9000`). Synchronizacja wyłącznie przez `tests/helpers/wait.py::wait_until(pred, timeout, every, desc)`, nigdy `sleep`.
 
@@ -194,7 +205,7 @@ Zasady: identyfikator testu = `tests/<poziom>/test_<komponent>.py::test_<obietni
 
 ## 10. Macierz pokrycia
 
-Status: ✅ przechodzi, ⏳ zaplanowany (etap). Wiersze etapu 0 z planu `qa-engineer` weryfikuje niezależnie.
+Status: ✅ przechodzi, ⏳ zaplanowany (etap), ❌ nie przechodzi (zgłoszone właścicielowi). Wiersze etapu 0 z planu `qa-engineer` weryfikuje niezależnie.
 
 | Dokument § | Obietnica | Poziom | Test | Status |
 |---|---|---|---|---|
@@ -257,12 +268,13 @@ Status: ✅ przechodzi, ⏳ zaplanowany (etap). Wiersze etapu 0 z planu `qa-engi
 | 01 §4, §9 | zmieniony `SIM_START` przy restarcie ignorowany z ostrzeżeniem, okno w `sim_state` bez zmian | integracyjny, `slow` | `test_simulator.py::test_changed_sim_start_on_restart_is_ignored_with_a_warning` | ✅ |
 | 01 §7 | ewolucja schematu w czystym strumieniu: wyłączona domyślnie, zdarzenie w swojej chwili, kanał deterministyczny dla późniejszych zakupów, SQL nullable, model dokładny, reguły zmiany ustawienia przy restarcie | unit | `tests/unit/test_simulator_evolution.py::test_off_leaves_the_stream_unchanged`, `::test_schema_event_sits_at_its_moment_and_only_later_purchases_get_a_channel`, `::test_same_second_purchase_comes_after_the_schema_event`, `::test_delivery_channel_is_deterministic_and_covers_all_values`, `::test_rendered_sql_adds_a_nullable_column_and_fills_it`, `::test_fold_counts_the_evolution_and_the_channels_exactly`, `::test_config_parses_the_evolution_moment`, `::test_changed_setting_on_restart_follows_the_resume_rules[…]` (7 przypadków) | ✅ |
 | 01 §7 | writer stosuje ewolucję (kolumna `text` nullable, `REPLICA IDENTITY FULL`, wiersz z kanałem, kursor) w transakcji wycofywanej; stos bez zmian | integracyjny | `tests/integration/test_simulator.py::test_schema_evolution_event_adds_a_nullable_column_and_fills_it_rolled_back` | ✅ |
-| 01 §7, 03 §5 | ewolucja na żywo z `SIM_SCHEMA_EVOLUTION_AT` w oknie: DDL raz (także po `kill`), kanały = czysty model, nowa wersja schematu przechodzi przez Debezium/Spark | e2e (własny stos) | etap 6, `tests/e2e/` | ⏳ |
-| 01 §4, §9 | po `SIM_END` faza `done`: kontener bezczynny i zdrowy; późniejszy `SIM_END` + restart wznawia od kursora | e2e (własny stos, okno kilku dni) | etap 6, `tests/e2e/` | ⏳ |
+| 01 §7, 03 §5 | ewolucja na żywo z `SIM_SCHEMA_EVOLUTION_AT` w oknie: DDL raz (także po `kill`), kanały = czysty model, nowa wersja schematu przechodzi przez Debezium/Spark | e2e (własny stos) | `tests/e2e/test_simulator_window.py::test_live_schema_evolution_adds_the_column_once_and_the_pipeline_takes_the_new_schema` | ✅ |
+| 01 §4, §9 | po `SIM_END` faza `done`: kontener bezczynny i zdrowy; późniejszy `SIM_END` + restart wznawia od kursora | e2e (własny stos, okno kilku dni) | `tests/e2e/test_simulator_window.py::test_end_of_window_done_idle_healthy_and_a_later_sim_end_resumes_from_the_cursor` | ✅ |
 | 01 §5 | stan bazy = preload + zdarzenia do kursora w czystym modelu (liczby, c/u/d, status × przychód) w jednym snapshocie | integracyjny | `test_simulator.py::test_database_state_equals_the_pure_fold_of_events_up_to_the_cursor`, `::test_sim_clock_is_a_naive_timestamp_in_the_window` | ✅ |
 | 01 §5, §8 | `kill` + restart symulatora: wznowienie od `sim_state`, bez ponownej inicjalizacji, bez duplikatów, liczby jak bez przerwy | integracyjny, `slow` | `test_simulator.py::test_kill_and_restart_resumes_from_sim_state_without_duplicates` | ✅ |
 | 03 §8, 08 §14 | `connect-init` zależy od zdrowego symulatora; plik konektora to czysty JSON z `${env:…}`, trybami, heartbeatem, grupami `topic.creation`, nadpisaniami producenta i `table.exclude.list` | unit | `test_compose_file.py::test_connect_init_waits_for_the_simulator_preload`, `::test_connector_json_is_pure_json_with_env_secret_and_topic_groups` | ✅ |
 | 04 §6, §8 | reguły walidacji consumera, opis zdarzeń, statystyki, śledzenie zamówienia; reguły po roli tabeli (kopie `zz_probe_<hex>_*`) | unit | `tests/unit/test_consumer_rules.py` (30 testów) | ✅ |
+| 04 §6, §8 | wyjście consumera bez TTY: linie i bloki `--stats` w potoku przed końcem procesu (bez `PYTHONUNBUFFERED`), SIGTERM daje `SUMMARY`, zamknięty potok (np. `head -n 5`) = wyjście 0 bez tracebacku, z `close()` (zgłoszenie QA etapu 5, 2026-10-27) | unit | `tests/unit/test_consumer_cli_output.py::test_live_lines_reach_the_pipe_while_the_consumer_runs`, `::test_stats_blocks_reach_the_pipe_while_the_consumer_runs`, `::test_reader_closing_the_pipe_stops_the_consumer_cleanly` | ✅ |
 | 03 §8, §11 | konektor zarejestrowany przez `connect-init`, `RUNNING`, slot aktywny; ponowny `PUT` bez zmian; hasło nigdy w REST | integracyjny | `tests/integration/test_debezium.py::test_connector_registered_by_connect_init_and_running`, `::test_register_twice_keeps_one_connector_with_the_current_config`, `::test_password_is_never_exposed_by_the_rest_api`, `test_connect.py::test_connect_init_registered_the_connector` | ✅ |
 | 03 §1, §3, §11 | INSERT/UPDATE/DELETE → `c/u/d` z pełnym `before`, `source.lsn`, blok `transaction`, tombstone; sondy w kopiach tabel (`probe_shop`), usunięte po teście, tabele biznesowe nietknięte | integracyjny | `test_debezium.py::test_insert_update_delete_give_c_u_d_with_full_before`, `::test_probe_rows_were_removed` | ✅ |
 | 03 §2, §11 | preload jako `op=r` (dokładnie raz), strumień bez dziury i duplikatu, `r` przed strumieniem, jeden snapshot | integracyjny | `test_debezium.py::test_preload_rows_arrive_as_snapshot_reads_and_the_stream_continues_without_gap_or_duplicate`, `::test_snapshot_time_is_recorded_in_source` | ✅ |
@@ -283,14 +295,15 @@ Status: ✅ przechodzi, ⏳ zaplanowany (etap). Wiersze etapu 0 z planu `qa-engi
 | 02 §9, §10 | initdb dwa razy → identyczny stan, teraz łącznie z tabelą `dbz.heartbeat` w publikacji i jej uprawnieniami | integracyjny | `test_postgres.py::test_initdb_twice_gives_identical_state` (snapshot katalogu rozszerzony o `pubtable` i `grant`) | ✅ |
 | 03 §13, 08 §14 | slot przed zapisanym offsetem (bezczynny stos): konektor wznawia od slotu (`trust_greater_lsn`), zmiana z czasu postoju dokładnie raz, bez powtórek | integracyjny, `slow` | `test_debezium.py::test_slot_ahead_of_the_stored_offset_resumes_from_the_slot_without_loss_or_duplicates` | ✅ |
 | 02 §8 | widoki prawdy, w tym `v_truth_reviews`, `v_truth_reviews_by_delivery`, `v_truth_payment_installments`: dokładne wartości na znanych danych, na żywym stosie zgodne z zapytaniami na `shop.*` | integracyjny | `test_postgres.py::test_truth_views_exact_on_known_data`, `::test_truth_views_apply_and_reconcile` | ✅ |
-| 03 §11 | `kill connect` w trakcie strumienia → wznowienie od offsetu, lag slotu do zera, uzgadnianie Postgres ↔ silver | e2e | etap 6 (wymaga silver z etapu 3; skill `fault-injection`) | ⏳ e2e |
-| 04 §8 | `kill kafka` w trakcie strumienia → Debezium i Spark wznawiają, uzgadnianie zgodne | e2e | etap 6 | ⏳ e2e |
+| 03 §11 | `kill connect` w trakcie strumienia → wznowienie od offsetu (bez nowego snapshotu), lag slotu do zera, uzgadnianie Postgres ↔ silver | e2e (awaria) | `tests/e2e/test_pipeline.py::test_kill_connect_mid_stream_resumes_from_its_offset_without_loss_or_duplicates` | ✅ |
+| 04 §8 | `kill kafka` w trakcie strumienia → Debezium i Spark wznawiają, uzgadnianie zgodne | e2e (awaria) | `tests/e2e/test_pipeline.py::test_kill_kafka_mid_stream_debezium_and_spark_resume_without_loss_or_duplicates` | ✅ |
 | 05 §2, §3, §10 | dekodowanie Confluent AVRO per `schema_id` (v1+v2 w paczce), tombstone odfiltrowany, wiadomość bez nagłówka → kwarantanna, najwyższy LSN w paczce | unit | `tests/unit/test_spark_decode.py` (4 testy) | ✅ |
 | 05 §4, §10 | MERGE c→u→d (miękkie usuwanie), ta sama paczka dwa razy, starsze po nowszym i `c` po `d`, `ADD COLUMN` w silver, wymuszona zmiana typu rzutowana | unit (Delta lokalnie) | `tests/unit/test_spark_silver.py` (5 testów) | ✅ |
-| 05 §5, §6, §10 | SCD2 + fakt z wersją z chwili zakupu, akumulujący snapshot i `is_late`, watermark (Structured Streaming), ujemna korekta, reguły jakości (cała paczka gold), exactly-once zdarzeń przychodu po awarii między commitami | unit (Delta lokalnie; 2 × `slow`) | `tests/unit/test_spark_gold.py` (7 testów) | ✅ |
-| 05 §5, §6, §12 | `fact_payments` i `fact_reviews`: ziarno, usunięcia, późniejsze atrybuty zamówienia (`is_late`, stan), opinia przed zamówieniem, powtórka paczki bez commitów, reguła oceny = CHECK (także `NULL`), backfill po zmianie `GOLD_SOURCES` | unit (Delta lokalnie; 2 × `slow`) | `tests/unit/test_spark_gold_payments_reviews.py` (5 testów) | ✅ |
+| 05 §5, §6, §10 | SCD2 + fakt z wersją z chwili zakupu, akumulujący snapshot i `is_late`, watermark (Structured Streaming), ujemna korekta, reguły jakości (cała paczka gold), każda reguła `reject` = jej CHECK w gold także dla `NULL` (`price_nonneg`, `freight_nonneg`, `score_range`; pozostałe CHECK na kolumnach liczonych), exactly-once zdarzeń przychodu po awarii między commitami | unit (Delta lokalnie; 2 × `slow`) | `tests/unit/test_spark_gold.py` (9 testów, 11 przypadków) | ✅ |
+| 05 §5, §6, §12 | `fact_payments` i `fact_reviews`: ziarno, usunięcia, późniejsze atrybuty zamówienia (`is_late`, stan), opinia przed zamówieniem, powtórka paczki bez commitów, backfill po zmianie `GOLD_SOURCES` (reguła oceny = CHECK: w `test_spark_gold.py`) | unit (Delta lokalnie; 2 × `slow`) | `tests/unit/test_spark_gold_payments_reviews.py` (4 testy) | ✅ |
 | 05 §5, §10, 02 §8 | płatności i opinie gold = `sim.v_truth_reviews`, `v_truth_reviews_by_delivery`, `v_truth_payments`, `v_truth_payment_installments` po nadrobieniu przez Sparka | integracyjny | `tests/integration/test_spark.py::test_payments_and_reviews_in_gold_reconcile_with_the_truth_views` | ✅ |
-| 05 §8, 06 §7, §9 | konfiguracja sesji: bez `enableFastS3AListFrom`, DV wyłączone, S3A path-style | unit | `tests/unit/test_spark_session.py` (2 testy) | ✅ |
+| 05 §8, 06 §7, §9 | konfiguracja sesji: bez `enableFastS3AListFrom`, DV wyłączone, S3A path-style; budżet ponowień S3A dla 507 `XMinioStorageFull` ≤ 120 s przy ≥ 5 próbach SDK na błąd połączenia | unit | `tests/unit/test_spark_session.py` (3 testy) | ✅ |
+| 05 §12, 08 §12.8 | pętla sterownika: linia upadku zapytania z kodem S3, restart z opóźnieniem, status `degraded`/`recovering` do ukończonego triggera, `ok` po powrocie | unit | `tests/unit/test_spark_supervisor.py` (5 testów) | ✅ |
 | 05 §1, 08 §1, §2 | `spark` domyślny, healthcheck, `depends_on`; JAR-y obrazu z macierzy z `.sha1`; `FROM` przypięty | unit | `test_compose_file.py::test_spark_service_runs_by_default_after_the_connector_and_minio_init`, `::test_spark_image_pins_every_connector_jar_with_a_checksum`, `::test_dockerfiles_pin_base_images` | ✅ |
 | 05 §10 | prawdziwe wiadomości Debezium → bronze i silver, typy `decimal`/`timestamp` = Postgres, UPDATE i DELETE (miękkie) | integracyjny | `tests/integration/test_spark.py::test_real_debezium_messages_reach_bronze_and_silver_with_types` | ✅ |
 | 05 §4, §10 | PK ze schematu klucza (8 tabel, bronze i silver) i dla tabeli dodanej w trakcie; Spark bez połączeń z Postgresem | integracyjny | `test_spark.py::test_primary_keys_come_from_the_key_schema`, `::test_add_column_reaches_silver_without_restart`, `::test_spark_never_connects_to_postgres` | ✅ |
@@ -299,17 +312,22 @@ Status: ✅ przechodzi, ⏳ zaplanowany (etap). Wiersze etapu 0 z planu `qa-engi
 | 06 §9, §11, §12 | każda tabela gold/ops czytelna dla delta-rs (konto `dashboard`) i DuckDB, `minReaderVersion = 1`, bez DV i column mapping; zapis Sparka = odczyt delta-rs = odczyt DuckDB | integracyjny | `tests/integration/test_delta.py::test_every_gold_and_ops_table_is_readable_by_delta_rs_and_duckdb`, `::test_spark_write_reads_identically_in_delta_rs_and_duckdb` | ✅ |
 | 06 §4, §5, §6, §11 | time travel, RESTORE, CDF (pre/post/delete), CHECK odrzuca, niezgodny typ odrzucony / `mergeSchema` przyjęty | integracyjny | `test_delta.py::test_time_travel_returns_the_state_before_a_later_merge`, `::test_restore_returns_the_table_to_a_version`, `::test_change_data_feed_after_merge_has_pre_post_images_and_deletes`, `::test_write_breaking_a_check_constraint_is_rejected`, `::test_type_mismatch_is_rejected_and_a_new_column_needs_merge_schema` | ✅ |
 | 06 §7, §11 | OPTIMIZE (mniej plików, ta sama suma), VACUUM (retencja, time travel w oknie), zadanie utrzymania w kontenerze z pomiarem w `ops/maintenance_log` | integracyjny (+`slow`) | `test_delta.py::test_optimize_compacts_files_and_keeps_the_data`, `::test_vacuum_removes_only_files_older_than_the_retention`, `::test_maintenance_job_runs_in_the_container_and_logs_before_after` | ✅ |
-| 07 §7 | warstwa zapytań: KPI, korekta z anulacji, lejek, puste tabele, wersja N, pamięć podręczna (brak odczytu bez zmiany wersji); pozostałe zapytania stron; kontrakt kolumn = `lakehouse/tables.py`; każda strona na fiksturach i na pustym jeziorze („czekam na dane”); filtry poza fragmentem | unit | `tests/unit/test_dashboard_queries.py` (11), `test_dashboard_lake.py` (5), `test_dashboard_contract.py` (3), `test_dashboard_app.py` (20) | ✅ |
+| 07 §7 | warstwa zapytań: KPI, korekta z anulacji, lejek, puste tabele, wersja N, pamięć podręczna (brak odczytu bez zmiany wersji); pozostałe zapytania stron; kontrakt kolumn = `lakehouse/tables.py`; każda strona na fiksturach i na pustym jeziorze („czekam na dane”); filtry poza fragmentem | unit | `tests/unit/test_dashboard_queries.py` (11), `test_dashboard_lake.py` (5), `test_dashboard_contract.py` (3), `test_dashboard_app.py` (30, w tym błąd MinIO w miejscu danych na 9 stronach) | ✅ |
 | 07 §1, 08 §2, §3 | `dashboard` domyślny po `minio-init` (nie po Sparku), healthcheck, port loopback, tylko klucze `dashboard`; zależności przypięte, GeoJSON 27 stanów w obrazie | unit | `test_compose_file.py::test_dashboard_service_runs_by_default_after_minio_init_only`, `::test_dashboard_image_pins_its_dependencies_and_vendors_the_geojson`, `::test_dockerfiles_pin_base_images` | ✅ |
 | 07 §7 | każda strona w `AppTest` na danych w MinIO (z hosta i wewnątrz obrazu); KPI = `delta_scan` DuckDB; konto `dashboard` czyta gold/ops, nie bronze/silver, nie zapisuje; kontener zdrowy, także przy pustym gold | integracyjny (+1 `slow`) | `tests/integration/test_dashboard.py` (14) | ✅ |
-| 07 §7 | KPI dashboardu = `sim.v_truth_*` po zakończeniu przebiegu | e2e | etap 5 | ⏳ e2e |
-| 07 §7 | podczas symulacji świeżość CDC < 30 s i opóźnienie e2e (p95 silver < 60 s, gold < 120 s) widoczne na dashboardzie | e2e | etap 5 | ⏳ e2e |
-| 05 §10, 07 | uzgadnianie `sim.v_truth_*` = silver; sumy gold = sumy silver (jednorazowo na stosie: [05-spark.md](05-spark.md) §12 „Pomiary”) | e2e | etap 5 | ⏳ e2e |
-| 05 §10 | `kill` Sparka w trakcie strumienia, restart → uzgadnianie zgodne | e2e (awaria) | etap 5 | ⏳ e2e |
-| 05 §10 | opóźnienie end-to-end poniżej progu przy domyślnym tempie (progi w 05 §12) | e2e | etap 5 | ⏳ e2e |
-| 06 §11 | usunięcie i odtworzenie kontenera Sparka → wznowienie z checkpointów w MinIO, bez duplikatów, uzgadnianie | e2e | etap 5 | ⏳ e2e |
-| 06 §11 | restart MinIO w trakcie strumienia → Spark ponawia, uzgadnianie zgodne | e2e (awaria) | etap 5 | ⏳ e2e |
-| 02–06 (awarie) | `kill` `connect`/`kafka`/`minio`/`spark`/`simulator` → uzgadnianie Postgres ↔ silver zgodne | e2e | etap 6 (skill `fault-injection`) | ⏳ |
+| 07 §7 | KPI dashboardu = `sim.v_truth_*` po zakończeniu przebiegu (przegląd, mapa, płatności i opinie) | e2e | `tests/e2e/test_pipeline.py::test_dashboard_kpis_equal_the_truth_views_after_the_run` | ✅ |
+| 07 §7 | podczas symulacji świeżość CDC < 30 s i opóźnienie e2e (p95 silver < 60 s, gold < 120 s) widoczne na dashboardzie | e2e | `tests/e2e/test_pipeline.py::test_cdc_freshness_and_end_to_end_latency_stay_below_the_thresholds` | ✅ |
+| 02 §10, 05 §10 | po przebiegu: `sim.v_truth_*` = silver (9 widoków), tabele wiersz po wierszu, bez duplikatów; sumy gold = sumy silver; stan bazy = czysty model okna | e2e | `tests/e2e/test_pipeline.py::test_after_the_run_truth_views_equal_silver_and_gold_sums_equal_silver` | ✅ |
+| 05 §10 | `kill` Sparka w trakcie strumienia, restart → uzgadnianie zgodne, checkpoint kontynuowany | e2e (awaria) | `tests/e2e/test_pipeline.py::test_kill_spark_mid_stream_resumes_from_checkpoints_and_reconciles` | ✅ |
+| 05 §10 | opóźnienie end-to-end poniżej progu przy domyślnym tempie (progi w 05 §12) | e2e | `tests/e2e/test_pipeline.py::test_cdc_freshness_and_end_to_end_latency_stay_below_the_thresholds` | ✅ |
+| 06 §11 | usunięcie i odtworzenie kontenera Sparka → wznowienie z checkpointów w MinIO, bez duplikatów, uzgadnianie | e2e | `tests/e2e/test_pipeline.py::test_removed_and_recreated_spark_container_resumes_from_minio_checkpoints` | ✅ |
+| 06 §11, 08 §5 | restart i `kill` MinIO w trakcie strumienia → Spark ponawia (ten sam kontener), uzgadnianie zgodne | e2e (awaria) | `tests/e2e/test_pipeline.py::test_restart_minio_mid_stream_spark_retries_and_reconciles`, `::test_kill_minio_mid_stream_spark_retries_and_reconciles` | ✅ |
+| 02–06, 08 §5 (awarie) | `kill` `connect`/`kafka`/`minio`/`spark`/`simulator`, a także `schema-registry` i `postgres` → uzgadnianie Postgres ↔ silver ↔ gold dokładne (każdy test awarii w `tests/e2e/test_pipeline.py`: po powrocie usługi symulator pisze dalej, potem jest wstrzymany, slot dogania ostatnią zmianę i wszystko jest równe) | e2e (awaria) | `tests/e2e/test_pipeline.py::test_kill_schema_registry_mid_stream_clients_retry_without_loss_or_duplicates` (te same subjecty i wersje), `::test_kill_postgres_mid_stream_simulator_and_debezium_reconnect_without_loss` (symulator łączy się ponownie bez restartu kontenera, stan = czysty model), `::test_kill_simulator_mid_stream_resumes_from_its_cursor_and_silver_reconciles`; pozostałe usługi: wiersze wyżej | ✅ |
+| 08 §12.8 | pełny dysk MinIO w trakcie strumienia (tmpfs 768 MiB, `tests/e2e/compose/minio-small-disk.yml`): MinIO odrzuca zapisy (`XMinioStorageFull`), Spark nic nie zatwierdza (silver stoi, symulator pisze), `spark` `unhealthy` bez restartu kontenera; po zwolnieniu miejsca (bez żadnej innej czynności) ten sam kontener wraca do `healthy`, uzgadnianie dokładne, checkpoint kontynuowany | e2e (awaria, własny stos) | `tests/e2e/test_minio_disk_full.py::test_minio_disk_full_stops_spark_and_after_freeing_space_it_recovers_without_loss` | ✅ (2026-10-27: `unhealthy` po 174 s, `healthy` 33 s po zwolnieniu miejsca, test 459 s) |
+| 08 §12.8 | objaw pełnego dysku: w logu `spark` w ≤ 150 s od odrzucenia zapisów linia `query … stopped … [S3 507 XMinioStorageFull …]` | e2e (ten sam scenariusz) | `tests/e2e/test_minio_disk_full.py::test_spark_logs_xminiostoragefull_while_minio_is_full` | ✅ (2026-10-27: pierwsza linia po 53 s, 74 linie w 290 s pełnego dysku) |
+| 08 §5 | usługa z `restart: unless-stopped`, której proces główny pada (tu: sterownik `spark` zabity `kill -9` wewnątrz kontenera), wraca bez `compose up`: ten sam kontener, `RestartCount` + 1, znowu `healthy` | integracyjny, `slow` | `tests/integration/test_stack.py::test_crashed_long_running_container_is_restarted_by_docker` | ✅ |
+| 05 §12 | zapytanie padające > 10 razy w 600 s kończy sterownik kodem 1 (wtedy Docker restartuje kontener, wiersz wyżej); trwały błąd zapisu MinIO (budżet S3A 30–90 s na próbę) nigdy nie osiąga limitu | unit | `tests/unit/test_spark_supervisor.py::test_query_failing_more_than_max_failures_in_the_window_exits_the_process`, `::test_lasting_store_error_never_reaches_the_failure_limit` | ✅ |
+| 07 §3 | MinIO zatrzymany: każda strona (z hosta i w kontenerze) bez nieobsłużonego wyjątku, błąd odczytu w miejscu danych; kontener `dashboard` zdrowy, bez restartu; po starcie MinIO następne odświeżenie pokazuje KPI | integracyjny, `slow` | `tests/integration/test_dashboard.py::test_dashboard_shows_an_error_while_minio_is_down_and_recovers` | ✅ (2026-10-28, po poprawce F1 w `analytics-dashboard`: opcje filtra stanów czytane w sposób strzeżony, `ui.state_filter`) |
 
 ## 11. CI
 
@@ -322,27 +340,112 @@ Status: ✅ przechodzi, ⏳ zaplanowany (etap). Wiersze etapu 0 z planu `qa-engi
 
 Runnery GitHub są `amd64`: obrazy gotowe są multi-arch, obrazy `wpdb/*` budują się natywnie (bez emulacji). Obrazy są budowane w osobnym kroku, żeby test budżetu 180 s mierzył tylko start (§2: „obrazy już zbudowane”); osobny krok `docker compose up` + `wait-healthy.sh` usunięto, bo fixture i tak zaczyna od `down -v`, więc stos startował dwa razy. Etap 3: testy jednostkowe Sparka potrzebują Javy 17 (domyślna na `ubuntu-24.04`, `tests/helpers/spark.py` korzysta też z `JAVA_HOME_17_X64`) i przy pierwszym uruchomieniu pobierają przez Ivy JAR-y Delta, spark-avro i hadoop-aws (ok. 290 MB, warto dodać cache `~/.ivy2`). Budżet joba `integration`: budowa obrazów na zimnym runnerze do ok. 20 min, dane ok. 1 min, start ≤ 3 min, pełny zestaw integracyjny ok. 25 min (§2.1); 75 min daje zapas na wolny runner, a zawieszony test nie zużyje domyślnych 6 h. Przebieg [40409895638](https://github.com/oszypczy/wpdb-data-platform/actions/runs/40409895638) (push `46a6aad`, 2026-10-26): `lint-unit` zaliczony w 3 min 7 s, `integration` pominięty zgodnie z warunkiem (tylko `workflow_dispatch`); job `integration` nie był jeszcze uruchomiony na GitHubie. Otwarte: cache warstw Go w GHA (`docker/bake-action` z `cache-to=type=gha`) skróciłby job o ok. 2 min; limit pobrań Docker Hub bez logowania (100/h na IP) może wymagać `docker/login-action` z sekretem; `make data` z Kaggle bez logowania do potwierdzenia na runnerze.
 
-## 12. Wdrożenie krok po kroku (README)
+## 12. Wdrożenie krok po kroku
 
-Wymagania: Docker Desktop (Compose v2, BuildKit), `uv`, `make`, ~10 GB RAM dla Dockera, dostęp do Docker Hub, quay.io, Confluent Hub i GitHub (źródła MinIO).
+Kanoniczna instrukcja dla osoby, która klonuje repozytorium: od czystej maszyny do działającego i sprawdzonego systemu. `README.md` w korzeniu repozytorium ma tylko skrót i odsyła tutaj; odczyt danych opisuje [06-minio-delta.md](06-minio-delta.md) §9.
+
+### 12.1 Wymagania
+
+| Co | Wymaganie |
+|---|---|
+| Docker | Docker Desktop albo Docker Engine z Compose v2 i BuildKit; `arm64` i `amd64` (obrazy gotowe są multi-arch, obrazy `wpdb/*` budują się natywnie, §1) |
+| RAM dla Dockera | ok. 10 GB: suma limitów ≈ 9.5 GB, zajęte w trakcie strumienia ok. 5.5–6 GB (§7); mierzone na 8 CPU |
+| Dysk dla Dockera | obrazy ok. 10 GB (największe: `wpdb/connect` 2.4 GB, `wpdb/spark` 2.4 GB, `cp-schema-registry` 1.5 GB, `wpdb/dashboard` 1.1 GB), cache buildu (Go dla MinIO, `uv`) i wolumeny, które na długo działającym stosie rosną do kilku GB (zmierzone 2026-10-27 po tygodniu testów: `kafka_data` 1.6 GB, `minio_data` 2.1 GB). Zalecany zapas ≥ 30 GB: przy pełnym dysku MinIO odrzuca zapisy (§12.8) |
+| Narzędzia na hoście | `make`, `curl`, `unzip` (`make data`); do testów `uv` (Python 3.12 instaluje się sam z `.python-version`) i JDK 17 (testy jednostkowe Sparka, `tests/helpers/spark.py`); `psql`, `mc`, `jq` nie są potrzebne |
+| Sieć przy pierwszym buildzie | Docker Hub, quay.io (Debezium), Confluent Hub (konwerter AVRO), GitHub (źródła MinIO), Maven Central (JAR-y Sparka), PyPI; dane z Kaggle bez konta |
+| Wolne porty hosta | 5432, 9092, 8081, 8083, 9000, 9091, 4040, 8501 (wszystkie wiązane do `127.0.0.1`, §3) |
+
+### 12.2 Uruchomienie
 
 ```bash
 git clone https://github.com/oszypczy/wpdb-data-platform && cd wpdb-data-platform
-make data                 # CSV Olist do data/olist/ (etap 1 i dalsze)
-make up                   # kopiuje .env.example → .env, docker compose up -d --build, czeka na healthy
-make ps                   # stan i zdrowie kontenerów
-make test-unit            # bez Dockera
-make test-integration     # zestaw szybki (bez `slow`) na działającym stosie (uruchamia go, gdy leży)
-make test-integration-full   # wszystkie testy integracyjne, także `slow`, na działającym stosie
-make test-integration-fresh  # wszystkie od pustych wolumenów, z testem budżetu startu (180 s)
-make logs S=connect       # logi jednej usługi
-make down                 # stop, dane zostają
-make reset                # stop + wolumeny usunięte (pełny reset)
+make data        # CSV Olist do data/olist/ (bez pliku geolocation); pomijane, gdy już są
+make up          # .env z .env.example (gdy brak), docker compose up -d --build, czekanie na healthy
+make ps          # stan i zdrowie kontenerów
 ```
 
-Adresy z hosta (wszystkie tylko z tej maszyny, porty wiązane do `127.0.0.1`): Postgres `localhost:5432` (`shop`, role z `.env`), Kafka `localhost:9092`, Schema Registry `http://localhost:8081`, Kafka Connect `http://localhost:8083`, MinIO API `http://127.0.0.1:9000`, konsola MinIO `http://127.0.0.1:9091` (login root z `.env`), Spark UI `localhost:4040` (etap 3), dashboard `http://localhost:8501` (etap 4).
+- **`.env`.** `make up` kopiuje `.env.example` do `.env` tylko wtedy, gdy `.env` nie istnieje. Sekrety (hasła ról Postgresa, klucze kont MinIO) są wyłącznie tam; wartości `-dev` z przykładu wystarczą na jednej maszynie, bo porty są tylko na loopback. Wersje nie są w `.env` (§1). Parametry symulatora (`SIM_SPEED`, `MAX_EVENTS_PER_SEC`, `SIM_START`, `SIM_END`, `SIM_SCHEMA_EVOLUTION_AT`) opisuje [01-business-system.md](01-business-system.md) §4, zestaw „Black Friday” na prezentację jest w komentarzu `.env.example`. Domyślny przebieg odtwarza 2017-01-05 → 2017-03-31 w ok. 90 min, potem symulator przechodzi w fazę `done`; nowy przebieg (także z innym oknem) wymaga `make reset`.
+- **Co znaczy „healthy”.** `make up` kończy się po `wait-healthy.sh 300`: każda usługa ma stan `healthy` (healthchecki w §3), a każdy kontener startowy (`kafka-init`, `minio-init`, `connect-init`) wyszedł z kodem 0. Skrypt wypisuje `all services healthy` i tabelę `docker compose ps`; przy błędzie `FAILED: <kontener> exited <kod>` albo `TIMEOUT after 300s` (§12.8). Kolejność startu wymuszają `depends_on` i healthchecki (§2).
+- **Ile to trwa.** Pierwszy `make up` buduje pięć obrazów (`wpdb/minio` z Go ze źródeł ok. 2 min, `wpdb/spark` pobiera JAR-y, `wpdb/connect`, `wpdb/dashboard`, `wpdb/simulator`) i pobiera obrazy bazowe; na zimnym runnerze CI do ok. 20 min (§11). Start ze zbudowanymi obrazami i pustymi wolumenami: **70 s** do „all services healthy” (§2.1, budżet testu 180 s). Po „healthy” Spark uruchamia kolejne zapytania jeszcze przez ok. 1 min; do tego czasu dashboard pokazuje „czekam na dane”.
 
-Pierwsze uruchomienie buduje `wpdb/minio` ze źródeł (ok. 2 min, cache BuildKit) i pobiera 6 obrazów. Docker Hub bez logowania limituje pobrania do 100/h na adres IP; przy `429 Too Many Requests` wystarczy `docker login` albo odczekanie.
+### 12.3 Adresy
+
+Wszystkie porty są publikowane tylko na `127.0.0.1`, więc działają wyłącznie z tej maszyny.
+
+| Usługa | Adres z hosta | Uwagi |
+|---|---|---|
+| Dashboard (Streamlit) | http://127.0.0.1:8501 | strona „Zdrowie potoku” pokazuje stan usług, świeżość CDC i opóźnienie end-to-end ([07-dashboard.md](07-dashboard.md) §2) |
+| Spark UI | http://127.0.0.1:4040 | zakładka „Structured Streaming”: wszystkie zapytania i ich mikropaczki |
+| Konsola MinIO | http://127.0.0.1:9091 | login `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` z `.env`; tylko przeglądarka obiektów (§13) |
+| MinIO API (S3) | http://127.0.0.1:9000 | path-style, bez TLS, region `us-east-1`; konta w [06-minio-delta.md](06-minio-delta.md) §2 |
+| Kafka Connect REST | http://127.0.0.1:8083 | np. `/connectors/olist-postgres/status` |
+| Schema Registry | http://127.0.0.1:8081 | np. `/subjects` |
+| Kafka | `localhost:9092` | z kontenerów `kafka:29092` |
+| PostgreSQL | `localhost:5432`, baza `shop` | rola tylko do odczytu `reader` (`READER_PASSWORD`); w kontenerze bez hasła: `docker compose exec postgres psql -U reader -d shop` |
+
+### 12.4 Weryfikacja działania
+
+Po `make up`, w tej kolejności (każdy krok sprawdza kolejny etap potoku):
+
+```bash
+make ps                                                       # wszystko healthy, *-init: Exited (0)
+curl -s http://127.0.0.1:8083/connectors/olist-postgres/status    # konektor i zadanie: "RUNNING"
+curl -s http://127.0.0.1:8081/subjects                        # olist.shop.<tabela>-key / -value
+docker compose run --rm consumer --stats                      # zdarzenia na żywo: tempo, c/u/d/r, lag, id schematów (Ctrl-C)
+docker compose exec spark python3 /app/healthcheck.py        # stan każdego zapytania Sparka
+```
+
+Potem dashboard (http://127.0.0.1:8501) i odczyt tabel Delta (§12.5). Automatycznie to samo, i dużo więcej, sprawdza `make test-integration` (§12.6).
+
+**Consumer** (`containers/consumer/`, profil `tools`, [04-kafka.md](04-kafka.md) §6) nie startuje z `make up`; `docker compose run` sam włącza jego profil i tworzy kontener jednorazowy:
+
+```bash
+docker compose run --rm consumer                                   # podgląd olist.shop.* na żywo
+docker compose run --rm consumer --stats                           # co 5 s: tempo, c/u/d/r/t, lag, schematy
+docker compose run --rm consumer --validate --from-beginning --until-end   # reguły walidacji na całym temacie
+docker compose run --rm consumer --follow-order <order_id>         # cykl życia jednego zamówienia (alias --trace)
+docker compose run --rm consumer --from-beginning --max-messages 50 --json --topics olist.shop.orders
+```
+
+Pozostałe opcje: `--group-id`, `--idle-timeout S`, `--stats-interval S`, `--verbose`, `--bootstrap`, `--schema-registry` (`containers/consumer/README.md`). Ostatnia linia to `SUMMARY events=… violations=… decode_errors=… clock=…`. Z hosta: `cd containers/consumer && uv run python -m consumer --stats` (domyślnie `localhost:9092`, `http://localhost:8081`).
+
+### 12.5 Odczyt danych z MinIO (Delta)
+
+Kanoniczny opis z katalogiem tabel i przykładami jest w [06-minio-delta.md](06-minio-delta.md) §9: DuckDB (`delta_scan`), Python `deltalake` (wersje, historia, time travel, CDF) i Spark. Skrót: tabele leżą pod `s3://<warstwa>/<tabela>` w kubełkach `bronze`, `silver`, `gold`, `ops` (np. `s3://gold/fact_order_items`, `s3://silver/orders`); z hosta endpoint `127.0.0.1:9000`. Konto `dashboard` czyta tylko `gold` i `ops`, konto `agent` wszystkie warstwy (tylko odczyt), klucze `spark` (zapis) zostają w kontenerze Sparka.
+
+### 12.6 Testy
+
+Poziomy i markery: §9; skill `run-tests`. Najpierw `make sync` (venv `uv` z zależnościami testów; cele testowe robią to same).
+
+| Komenda | Co robi | Potrzebuje | Czas (§2.1) |
+|---|---|---|---|
+| `make test-unit` | `pytest -m unit`, bez Dockera | `uv`, JDK 17 (lokalna sesja Sparka, JAR-y przez Ivy przy pierwszym uruchomieniu) | ok. 2.5 min |
+| `make test-integration` | zestaw szybki (`integration and not slow`) | Docker; stos uruchamia fixture `stack`, gdy leży, i go **nie** zatrzymuje | ok. 5–11 min |
+| `make test-integration-full` | wszystkie integracyjne, także `slow`, na działającym stosie | j.w. | ok. 17 min |
+| `make test-integration-fresh` | `down -v` (**kasuje wolumeny**), start, test budżetu startu 180 s, wszystkie integracyjne; to uruchamia CI (§11) | j.w. | jak pełny zestaw + start od zera |
+| `make test-e2e` | trzy świeże stosy po kolei (`down -v`, **kasuje wolumeny**): pełny dysk MinIO, potok z awarią każdej usługi i uzgadnianiem Postgres ↔ silver ↔ gold, okno symulatora (ewolucja schematu, koniec okna); na końcu stos domyślny od zera; dowody każdej awarii w `.pytest_cache/wpdb-e2e/report.jsonl` | j.w. | ok. 1 h (status w §10) |
+
+`make lint` uruchamia `ruff check` i `ruff format --check`. Tabele-sondy testów integracyjnych (`shop.zz_probe_*`) znikają z Postgresa na końcu sesji, ale ich ślad zostaje w bronze/silver ([03-debezium.md](03-debezium.md) §11); stos do oddania lub prezentacji stawiamy od zera: `make reset && make up`.
+
+### 12.7 Zatrzymanie i reset
+
+`make down` zatrzymuje stos i zachowuje wolumeny (po `make up` wszystko wznawia się od miejsca, w którym stanęło); `make reset` usuwa też wolumeny (Postgres, Kafka, MinIO z checkpointami), więc następny `make up` startuje od zera. Kiedy który: §6. `make logs` (albo `make logs S=<usługa>`) śledzi logi.
+
+### 12.8 Rozwiązywanie problemów
+
+| Objaw | Przyczyna | Co zrobić |
+|---|---|---|
+| `make up` kończy się `FAILED: <kontener>-init exited <kod>` | kontener startowy nie domknął pracy (np. `connect-init`: konektor nie doszedł do `RUNNING` w 120 s) | `docker compose logs <kontener>`; po poprawce `docker compose up -d --force-recreate --no-deps <kontener>` (idempotentne, §4) |
+| `TIMEOUT after 300s` | usługa nie doszła do `healthy` | `make ps` pokazuje, która; `make logs S=<usługa>`; najczęściej za mało RAM dla Dockera (OOM-kill i restart, `docker stats`) |
+| `simulator` nie startuje albo jest `unhealthy` | brak CSV w `data/olist/` | `make data`, potem `make up` |
+| `429 Too Many Requests` przy pobieraniu obrazów | limit Docker Hub bez logowania (100/h na IP) | `docker login` albo odczekanie |
+| `port is already allocated` | port z §12.3 zajęty przez inny proces | zwolnić port; numery portów są kontraktem (skill `stack-ops`), nie zmieniamy ich lokalnie |
+| zadanie konektora `FAILED` (`/connectors/olist-postgres/status`) | błąd w strumieniu CDC; znane przyczyny i poprawki w skillu `debezium-connector` i [03-debezium.md](03-debezium.md) §13 | ślad błędu w polu `trace` statusu; restart samego zadania: `curl -X POST 'http://127.0.0.1:8083/connectors/olist-postgres/restart?includeTasks=true&onlyFailed=true'`; po zmianie JSON konektora `docker compose up -d --force-recreate --no-deps connect-init` |
+| w logu `spark` (w ciągu ok. 1–1,5 min od zapełnienia dysku) linie `WARNING lakehouse.supervisor: query <nazwa> stopped (n in 600 s, restart in t s) [S3 507 XMinioStorageFull: MinIO's disk is full …]` i `health degraded: … last S3 error: S3 507 XMinioStorageFull`; po ok. 3 min `spark` `unhealthy`; dashboard bez nowych danych | zabrakło miejsca na dysku Dockera, więc MinIO odrzuca zapisy (zaobserwowane 2026-10-25). Spark ponawia każdy zapis 30–90 s, potem paczka pada, a pętla sterownika wznawia zapytanie co 10–60 s; nic nie jest zatwierdzane, kontener się nie restartuje | `docker system df`; zwolnić miejsce: `docker builder prune`, `docker image prune` (nieużywane obrazy), ewentualnie większy dysk w Docker Desktop. **Nic więcej nie trzeba:** najbliższe ponowienie (≤ ok. 1,5 min) przechodzi, zapytania wznawiają z checkpointów w MinIO bez strat i duplikatów (bronze `txnAppId/txnVersion`, silver strażnik LSN), w logu pojawia się `health ok: all 13 queries active and working`, a `spark` wraca do `healthy`. `docker compose restart spark` jest bezpieczny (§5), ale zbędny. Test e2e: `tests/e2e/test_minio_disk_full.py` (§10) |
+| `spark` `unhealthy` z innego powodu | zapytanie padło i pętla sterownika go nie podniosła | `docker compose exec spark python3 /app/healthcheck.py`, `make logs S=spark`; `docker compose restart spark`. Uszkodzony checkpoint albo zmiana schematu sinku: tabelę i jej checkpoint czyścimy razem (§6), najprościej `make reset` |
+| dashboard długo pokazuje „czekam na dane” | gold jeszcze pusty: Spark nie skończył pierwszych paczek albo stoi | stan Sparka jak wyżej; Spark UI http://127.0.0.1:4040 |
+| `make up` / `docker compose up -d` kończy się „dependency failed to start: container kafka is unhealthy”, choć broker działa | do etapu 5: healthcheck `kafka-topics --list` startował JVM i pod obciążeniem Sparka przekraczał `timeout: 5s` (QA F2, §3) | naprawione: healthcheck to żądanie `ApiVersions` bez JVM, a `init: true` zbiera osierocone procesy. Jeśli objaw wraca: `docker inspect -f '{{json .State.Health}}' kafka` (wynik i czas ostatnich 5 sprawdzeń), `docker compose exec kafka python3 /usr/local/bin/kafka-healthcheck.py` (przyczyna na stderr) |
+| usługa zatrzymana po `docker kill` | `restart: unless-stopped` nie podnosi kontenera zabitego ręcznie (§5) | `docker compose up -d <usługa>` |
 
 ## 13. MinIO: dystrybucja, build ze źródeł, CVE-2026-40344
 
