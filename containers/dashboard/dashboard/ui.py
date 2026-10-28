@@ -69,6 +69,40 @@ def live(fn: Callable[[], Any]) -> Callable[[], Any]:
     return wrapper
 
 
+_STATES_SEEN = "_state_options_seen"  # last state list read from the lake (this session)
+_STATES_SHOWN = "_state_options_shown"  # the list the page-level filter was built from
+
+
+def _states() -> list[str]:
+    return sorted(reader().get(GEOGRAPHY).column("state").to_pylist())
+
+
+def state_filter(container: Any = st) -> list[str]:
+    """The customer-state multiselect, outside the live fragment so a refresh keeps the
+    selection (07 §3). Its options come from the lake, so the read is guarded: while
+    MinIO is down the last list seen in this session (or none) is used and the error is
+    shown by the fragment in place of the data; ``refresh_state_filter`` in the
+    fragment reruns the page once the lake returns a different list."""
+    try:
+        options = _states()
+        st.session_state[_STATES_SEEN] = options
+    except Exception:  # noqa: BLE001 - the fragment shows the same error and retries
+        options = st.session_state.get(_STATES_SEEN, [])
+    st.session_state[_STATES_SHOWN] = options
+    return container.multiselect("Stany klienta (puste = wszystkie)", options)
+
+
+def refresh_state_filter() -> None:
+    """Inside a live fragment: rerun the whole page when the state list in the lake
+    differs from the one the filter shows (MinIO back after an outage at page load,
+    or the first states written into an empty gold). A read error propagates to
+    ``live`` and is shown in place like any other read."""
+    current = _states()
+    if current != st.session_state.get(_STATES_SHOWN):
+        st.session_state[_STATES_SEEN] = current
+        st.rerun()
+
+
 def waiting() -> None:
     st.info(WAITING)
 

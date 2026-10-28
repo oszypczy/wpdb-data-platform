@@ -20,10 +20,7 @@ PAYMENT_TYPES = {
 ON_TIME = {True: "w terminie", False: "po terminie"}
 SCORES = [f"ocena {s}" for s in q.REVIEW_SCORES]
 
-states = st.multiselect(
-    "Stany klienta (puste = wszystkie)",
-    sorted(ui.reader().get(ui.GEOGRAPHY).column("state").to_pylist()),
-)
+states = ui.state_filter()
 
 
 def _types(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
@@ -48,6 +45,7 @@ def _type_chart(df: pd.DataFrame, order: list[str], metric: str, title: str, key
 
 @ui.live
 def body() -> None:
+    ui.refresh_state_filter()
     r = ui.reader()
     sel = tuple(sorted(states)) or None
     tables = [ui.PAYMENTS, ui.REVIEWS]

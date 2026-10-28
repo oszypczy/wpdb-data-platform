@@ -10,14 +10,12 @@ st.title("Sprzedaż w czasie")
 GRAIN = {"Godzina": "hour", "Dzień": "day", "Tydzień": "week"}
 f1, f2 = st.columns([1, 3])
 grain = f1.radio("Ziarno", list(GRAIN), index=1, horizontal=True)
-states = f2.multiselect(
-    "Stany klienta (puste = wszystkie)",
-    sorted(ui.reader().get(ui.GEOGRAPHY).column("state").to_pylist()),
-)
+states = ui.state_filter(f2)
 
 
 @ui.live
 def body() -> None:
+    ui.refresh_state_filter()
     r = ui.reader()
     sel = tuple(sorted(states)) or None
     ts = r.derive("revenue_ts", [ui.REVENUE_HOURLY], q.revenue_timeseries, GRAIN[grain], sel)

@@ -4,6 +4,8 @@ integration row of 07 §7 (tests/integration/test_dashboard.py)."""
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
 
 from tests.helpers import dashboard_fixtures as fx
@@ -86,3 +88,38 @@ def test_payments_reviews_shows_the_kpis_and_the_delivery_comparison(small_lake,
     metrics = {m.label: m.value for m in at.metric}
     assert (metrics["Średnia ocena"], metrics["Karta kredytowa"]) == ("2,00", "0,0 %")
     assert metrics["Średnia liczba rat"] == "–"  # no credit card payment in RJ
+
+
+MINIO_ERROR = "Nie udało się odczytać danych z MinIO: "
+
+
+@pytest.mark.parametrize("page", PAGES)
+def test_page_shows_a_lake_error_in_place_and_recovers(page, small_lake, tmp_path, monkeypatch):
+    """07 §3 without Docker: every lake read fails (like a stopped MinIO, before the
+    reader cached anything) -> no uncaught exception, only the in-place read error, the
+    filters (incl. the state filter built from gold/dim_geography) still render. Once
+    reads work again the next run shows the data and the state filter gets its options."""
+    from dashboard.lake import Lake
+
+    lake = tmp_path / "lake"  # fresh root = fresh per-process reader (no cached data)
+    shutil.copytree(small_lake, lake)
+    monkeypatch.setenv("DASHBOARD_LAKE_ROOT", str(lake))
+    real_version = Lake.version
+
+    def down(self, table):
+        raise OSError(f"Generic S3 error: GET {table}/_delta_log: dns error")
+
+    monkeypatch.setattr(Lake, "version", down)
+    at = render(page)
+    assert [e.value for e in at.exception] == [], page
+    errors = [e.value for e in at.error]
+    assert errors and all(e.startswith(MINIO_ERROR) for e in errors), errors
+    if page in ("sales", "payments_reviews"):
+        assert at.multiselect[0].options == []
+
+    monkeypatch.setattr(Lake, "version", real_version)
+    at.run()
+    assert problems(at) == [], page
+    assert "Czekam na dane" not in texts(at), page
+    if page in ("sales", "payments_reviews"):
+        assert at.multiselect[0].options == ["AC", "MG", "RJ", "SP"]
