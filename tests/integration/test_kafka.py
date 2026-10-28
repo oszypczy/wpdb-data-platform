@@ -60,6 +60,7 @@ def test_auto_create_disabled(kafka_admin):
     p = Producer(
         {
             "bootstrap.servers": "localhost:9092",
+            "broker.address.family": "v4",
             "topic.metadata.propagation.max.ms": 1000,
             "message.timeout.ms": 15000,
         }
@@ -100,7 +101,9 @@ def test_producer_to_explicitly_created_topic_is_acked(kafka_admin):
             lambda: topic in kafka_admin.list_topics(timeout=10).topics, 15, desc="topic listed"
         )
         delivered = []
-        p = Producer({"bootstrap.servers": "localhost:9092", "acks": "all"})
+        p = Producer(
+            {"bootstrap.servers": "localhost:9092", "acks": "all", "broker.address.family": "v4"}
+        )
         p.produce(topic, key=b"k", value=b"v", on_delivery=lambda e, m: delivered.append((e, m)))
         p.flush(15)
         assert delivered and delivered[0][0] is None, delivered

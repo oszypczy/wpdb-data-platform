@@ -13,6 +13,7 @@ from confluent_kafka.admin import AdminClient
 
 PG_HOST, PG_PORT, PG_DB = "localhost", 5432, "shop"
 KAFKA_BOOTSTRAP_HOST = "localhost:9092"
+KAFKA_HOST_FAMILY = {"broker.address.family": "v4"}
 SCHEMA_REGISTRY_URL = "http://localhost:8081"
 CONNECT_URL = "http://localhost:8083"
 MINIO_URL = "http://localhost:9000"
@@ -31,7 +32,11 @@ def pg_connect(user: str, password: str, **kw: Any) -> psycopg.Connection:
 
 
 def kafka_admin(bootstrap: str = KAFKA_BOOTSTRAP_HOST) -> AdminClient:
-    return AdminClient({"bootstrap.servers": bootstrap, "socket.timeout.ms": 10000})
+    # v4 only: the host port is bound to 127.0.0.1, and on CI runners `localhost` resolves
+    # to ::1 first; every refused ::1 attempt grows librdkafka's reconnect backoff
+    return AdminClient(
+        {"bootstrap.servers": bootstrap, "socket.timeout.ms": 10000, **KAFKA_HOST_FAMILY}
+    )
 
 
 def minio_client(access_key: str, secret_key: str):
