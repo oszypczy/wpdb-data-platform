@@ -74,6 +74,20 @@ def pg_debezium(stack, settings):
     yield from _pg(settings, "debezium", "DEBEZIUM_DB_PASSWORD")
 
 
+@pytest.fixture
+def paused_simulator(stack):
+    """The simulator stopped (SIGTERM: after its current transaction, 01 §5) for a test
+    that compares Postgres with the lake: Spark trails Postgres by ~20 s (silver) / ~45 s
+    (gold), so while purchases keep coming the two sides rarely agree at one moment. Started
+    again (resuming from its cursor) at the end."""
+    stack.run("stop", "simulator")
+    try:
+        yield
+    finally:
+        stack.run("up", "-d", "--no-deps", "simulator")
+        stack.wait_healthy(timeout=300)
+
+
 # --- Kafka / Schema Registry / Connect ------------------------------------------
 @pytest.fixture
 def kafka_admin(stack):

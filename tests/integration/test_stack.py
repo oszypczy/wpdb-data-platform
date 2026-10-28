@@ -115,3 +115,38 @@ def test_init_container_idempotent(stack: ComposeStack, service: str):
             "agent": ("enabled", ["agent-ro"]),
         }, before["attachments"]
         assert {"spark", "dashboard", "agent-ro"} <= set(before["policies"]), before["policies"]
+
+
+@pytest.mark.slow
+def test_crashed_long_running_container_is_restarted_by_docker(stack: ComposeStack):
+    """08 §5: "Usługi długotrwałe mają `restart: unless-stopped` [...] polityka działa przy
+    OOM, błędzie procesu i restarcie demona" (Docker, not compose, brings a crashed
+    service back). Representative service: `spark`. Its driver (`python3 /app/main.py`,
+    child of the spark-submit JVM, PID 1) is SIGKILLed from inside the container, as a
+    crash would end it; nothing else is done (no `compose up`/`start`). The JVM exits
+    non-zero (spark-submit returns the driver's status), Docker restarts the SAME
+    container (same Id, RestartCount + 1, new StartedAt), and it becomes healthy again
+    with its Kafka -> bronze query active. This is also the container half of 05 §12
+    "> 10 failures in 10 min → exit 1 → Docker restarts the container" (the supervisor
+    half: tests/unit/test_spark_supervisor.py)."""
+    from tests.helpers.wait import wait_until
+
+    before = stack.inspect("spark")
+    assert before["HostConfig"]["RestartPolicy"]["Name"] == "unless-stopped"
+    assert before["State"]["Health"]["Status"] == "healthy", before["State"]["Health"]
+    pid = stack.exec("spark", "pgrep", "-f", "^python3 /app/main.py").stdout.split()
+    assert len(pid) == 1, pid
+    stack.exec("spark", "kill", "-9", pid[0], check=False)
+
+    def restarted() -> dict | None:
+        st = stack.inspect("spark")
+        return st if st["RestartCount"] == before["RestartCount"] + 1 else None
+
+    after = wait_until(restarted, 180, every=1, desc="Docker restarted spark by itself")
+    assert after["Id"] == before["Id"]
+    assert after["State"]["StartedAt"] != before["State"]["StartedAt"]
+    wait_until(lambda: stack.health("spark") == "healthy", 300, every=2,
+               desc="spark healthy again")  # fmt: skip
+    health = json.loads(stack.exec("spark", "cat", "/tmp/spark/health.json").stdout)
+    assert health["status"] == "ok" and health["queries"]["kafka_to_bronze"]["active"], health
+    assert stack.inspect("spark")["RestartCount"] == before["RestartCount"] + 1

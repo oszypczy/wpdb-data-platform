@@ -627,7 +627,9 @@ def test_slot_ahead_of_the_stored_offset_resumes_from_the_slot_without_loss_or_d
         # the incident's precondition: Debezium's own start-up check would reject this
         assert cdc.lsn_to_int(slot["restart_lsn"]) > int(stored["lsn_proc"]), (stored, slot)
         row_id = 700_000 + int(time.time()) % 100_000
-        pg_app.execute(f"INSERT INTO shop.{probe.table} VALUES (%s, 'after-skip')", (row_id,))
+        # an untyped literal: `v` is text, or integer after the type-change test of this
+        # session (test_incompatible_type_change_is_rejected_...) ran on the same probe
+        pg_app.execute(f"INSERT INTO shop.{probe.table} (id, v) VALUES (%s, '{row_id}')", (row_id,))
         cdc.resume_connector(connect)
         cdc.wait_running(connect, timeout=120)
         recs = topic_reader.read_new(
@@ -636,7 +638,7 @@ def test_slot_ahead_of_the_stored_offset_resumes_from_the_slot_without_loss_or_d
             timeout=90,
         )
         mine = [r for r in recs if r.key == {"id": row_id}]
-        assert [r.op for r in mine] == ["c"] and mine[0].after["v"] == "after-skip", mine
+        assert [r.op for r in mine] == ["c"] and str(mine[0].after["v"]) == str(row_id), mine
         probe.note(mine[0])
         assert len(recs) == 1, f"records re-delivered on the probe topic: {recs}"
         for t in business:  # nothing of the past is streamed again

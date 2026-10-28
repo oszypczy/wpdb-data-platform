@@ -153,7 +153,9 @@ def test_business_topics_match_the_topic_design(kafka_admin):
         t
         for t in md.topics
         if (t.startswith("olist.") or t == HEARTBEAT_TOPIC)
-        and not t.startswith(f"olist.shop.{cdc.PROBE_PREFIX}")  # session probe, see conftest
+        # session probes (conftest): captured_probe_table and the probe shop's tables
+        and not t.startswith(f"olist.shop.{cdc.PROBE_PREFIX}")
+        and not t.startswith(f"olist.shop.{cdc.PROBE_SHOP_PREFIX}")
     }
     assert olist == set(TOPIC_DESIGN), sorted(olist ^ set(TOPIC_DESIGN))
     for name, want in TOPIC_DESIGN.items():

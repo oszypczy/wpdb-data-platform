@@ -291,12 +291,15 @@ def _truth_aggregates(pg) -> dict[str, dict]:
     return out
 
 
-def test_payments_and_reviews_in_gold_reconcile_with_the_truth_views(lake, pg_reader):
+def test_payments_and_reviews_in_gold_reconcile_with_the_truth_views(
+    lake, pg_reader, paused_simulator
+):
     """05 §10: gold/fact_payments and gold/fact_reviews equal the Postgres truth views
     once Spark has caught up: reviews and distinct orders per score, reviews and average
     score of delivered orders per on-time flag (is_late of fact_orders_lifecycle), and
-    payments with their value per type and per number of installments. Both sides are
-    re-read every round, so the test also passes while the simulator is still running."""
+    payments with their value per type and per number of installments. The simulator is
+    paused meanwhile (fixture `paused_simulator`): with purchases every few seconds and
+    gold ~45 s behind, the two sides never met on a fresh stack (2026-10-27)."""
     for t in ("fact_payments", "fact_reviews"):
         assert lake.exists(f"s3://gold/{t}"), t
     state: dict[str, dict] = {}

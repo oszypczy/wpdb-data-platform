@@ -154,7 +154,7 @@ Testy: `test_postgres.py::test_truth_views_exact_on_known_data` wykonuje plik dw
 | integracyjny | skrypty startowe na pustym wolumenie, dwa razy | identyczny stan bazy |
 | integracyjny | DELETE z `order_items` po `order_id` | plan zapytania używa indeksu FK |
 | integracyjny | widoki prawdy (§8) | dokładne wartości na znanym zestawie danych, w tym `v_truth_reviews`, `v_truth_reviews_by_delivery`, `v_truth_payment_installments`; na żywym stosie zgodne z bezpośrednimi zapytaniami na `shop.*` (`test_postgres.py::test_truth_views_exact_on_known_data`, `::test_truth_views_apply_and_reconcile`) |
-| e2e | uzgadnianie | widoki `sim.v_truth_*` zgodne z tabelami silver w Delta po zakończeniu przebiegu |
+| e2e | uzgadnianie | widoki `sim.v_truth_*` zgodne z tabelami silver w Delta po zakończeniu przebiegu (✅ etap 5: `tests/e2e/test_pipeline.py::test_after_the_run_truth_views_equal_silver_and_gold_sums_equal_silver`: wszystkie 9 widoków policzone na silver, każda tabela `shop` wiersz po wierszu i kolumna po kolumnie, po przebiegu z awarią każdej usługi; to samo uzgodnienie po każdej awarii w `test_pipeline.py`) |
 
 ## 11. Podsumowanie
 

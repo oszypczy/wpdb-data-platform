@@ -7,9 +7,11 @@ the final stage (08 §10)."""
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import uuid
-from decimal import ROUND_HALF_UP, Decimal
+from datetime import datetime
+from decimal import Decimal
 
 import duckdb
 import pyarrow as pa
@@ -18,6 +20,7 @@ import requests
 
 from dashboard import queries as q
 from dashboard.lake import Lake, LakeConfig, VersionedReader
+from tests.helpers import kpis
 from tests.helpers.dashboard_app import PAGES, problems, render, texts
 from tests.helpers.lake import Lake as AgentLake
 from tests.helpers.lake import duck, storage_options
@@ -71,14 +74,20 @@ def test_every_page_renders_on_the_live_minio_data(page, gold_ready, dashboard_e
     assert "Czekam na dane" not in texts(at), page
 
 
-def test_query_layer_on_live_gold_equals_duckdb_delta_scan(gold_ready, settings):
+def test_query_layer_on_live_gold_equals_duckdb_delta_scan(gold_ready, settings, paused_simulator):
     """The KPIs of the query layer (delta-rs → Arrow → DuckDB) equal plain SQL over
-    ``delta_scan`` of the same tables (DuckDB delta extension, read-only `agent`)."""
+    ``delta_scan`` of the same tables (DuckDB delta extension, read-only `agent`), and
+    gross sales + corrections of ``agg_revenue_hourly`` = net revenue of the fact. The
+    aggregate is written by another query one trigger after the fact, so with purchases
+    every second the two never agree at one moment (failed 2026-10-27 on a fresh stack):
+    the simulator is paused (fixture ``paused_simulator``) until gold has caught up."""
     reader = VersionedReader(gold_ready)
     agent = AgentLake(settings, "agent")
 
     def both():
-        vs = reader.versions(["gold/fact_order_items", "gold/fact_orders_lifecycle"])
+        vs = reader.versions(
+            ["gold/fact_order_items", "gold/fact_orders_lifecycle", "gold/agg_revenue_hourly"]
+        )
         k = reader.derive(
             "kpis",
             ["gold/fact_order_items", "gold/fact_orders_lifecycle", "gold/agg_revenue_hourly"],
@@ -94,73 +103,34 @@ def test_query_layer_on_live_gold_equals_duckdb_delta_scan(gold_ready, settings)
         return same_versions and (k, ref)
 
     # a Spark commit between the two reads would make them differ: retry until stable
-    k, ref = wait_until(lambda: (lambda r: r and r[0].revenue == r[1][0] and r)(both()),
-                        timeout=120, every=2, desc="a stable pair of reads")  # fmt: skip
+    def caught_up(r):
+        return r and r[0].revenue == r[1][0] and r[0].gross_sales + r[0].corrections == r[0].revenue
+
+    k, ref = wait_until(
+        lambda: (lambda r: caught_up(r) and r)(both()),
+        timeout=180,
+        every=2,
+        desc="a stable pair of reads, gold caught up",
+    )
     assert (k.revenue, k.orders, k.late) == (Decimal(ref[0]), ref[1], ref[2])
     assert k.gross_sales + k.corrections == k.revenue
 
 
-def _payments_reviews_of_the_query_layer(reader: VersionedReader) -> dict[str, dict]:
-    """The page's queries on live gold, shaped like the truth views (BRL, before the
-    USD conversion of the view layer)."""
-    pay, rev = "gold/fact_payments", "gold/fact_reviews"
-
-    def money(v: float) -> Decimal:
-        return Decimal(f"{v:.2f}")
-
-    dist = reader.derive("score_distribution", [rev], q.score_distribution, None)
-    by = reader.derive("reviews_by_delivery", [rev], q.reviews_by_delivery, None)
-    types = reader.derive("payment_types", [pay], q.payment_types, None)
-    inst = reader.derive("payment_installments", [pay], q.payment_installments, None)
-    k = reader.derive("payments_reviews_kpis", [pay, rev], q.payments_reviews_kpis, None)
-    return {
-        "v_truth_reviews": {
-            int(s): (int(n), int(o))
-            for s, n, o in dist[["review_score", "reviews", "orders"]].values
-            if n > 0
-        },
-        "v_truth_reviews_by_delivery": {
-            bool(t): (int(n), Decimal(f"{a:.6f}").quantize(Decimal("0.01"), ROUND_HALF_UP))
-            for t, n, a in by[["on_time", "reviews", "avg_score"]].values
-        },
-        "v_truth_payments": {
-            t: (int(n), money(v)) for t, n, v in types[["payment_type", "payments", "value"]].values
-        },
-        "v_truth_payment_installments": {
-            int(i): (int(n), money(v))
-            for i, n, v in inst[["payment_installments", "payments", "value"]].values
-        },
-        "kpis": {"payments": k.payments, "value": k.payment_value, "reviews": k.reviews},
-    }
-
-
-def _payments_reviews_truth(pg) -> dict[str, dict]:
-    out = {}
-    for view in ("v_truth_reviews", "v_truth_reviews_by_delivery", "v_truth_payments",
-                 "v_truth_payment_installments"):  # fmt: skip
-        rows = pg.execute(f"SELECT * FROM sim.{view}").fetchall()
-        out[view] = {k: (int(a), b if isinstance(b, Decimal) else int(b)) for k, a, b in rows}
-    pays = out["v_truth_payments"].values()
-    out["kpis"] = {
-        "payments": sum(n for n, _ in pays),
-        "value": sum((v for _, v in pays), Decimal("0.00")),
-        "reviews": sum(n for n, _ in out["v_truth_reviews"].values()),
-    }
-    return out
-
-
-def test_payments_reviews_queries_on_live_gold_equal_the_truth_views(gold_ready, pg_reader):
+def test_payments_reviews_queries_on_live_gold_equal_the_truth_views(
+    gold_ready, pg_reader, paused_simulator
+):
     """07 §7 "Płatności i opinie": the page's queries on live gold (account `dashboard`)
     equal the Postgres truth views: reviews and distinct orders per score, reviews and
     average score (rounded like ``numeric(4,2)``) of delivered orders on time vs late,
     payments and BRL value per type and per number of installments, and the KPI totals.
-    Both sides are re-read every round, so a running simulator only delays equality."""
+    The simulator is paused meanwhile (fixture `paused_simulator`): gold trails Postgres
+    by ~45 s, so with purchases every few seconds the two sides rarely meet."""
     reader = VersionedReader(gold_ready)
     state: dict[str, dict] = {}
 
     def equal() -> bool:
-        state["truth"] = _payments_reviews_truth(pg_reader)
-        state["gold"] = _payments_reviews_of_the_query_layer(reader)
+        state["truth"] = kpis.payments_reviews_truth(pg_reader)
+        state["gold"] = kpis.payments_reviews_of_the_query_layer(reader)
         return state["gold"] == state["truth"]
 
     try:
@@ -275,3 +245,82 @@ def test_dashboard_container_is_healthy_with_an_empty_gold(stack):
         assert out == {p: [[], True] for p in PAGES}
     finally:
         stack.docker("rm", "-f", name, check=False)
+
+
+# Every page inside the container with MinIO down: {page: [exceptions, errors]}.
+IN_CONTAINER_ERRORS = """
+import json
+from streamlit.testing.v1 import AppTest
+out = {}
+for page in %s:
+    at = AppTest.from_file("/app/app.py", default_timeout=120)
+    at.run()
+    at.switch_page(f"views/{page}.py").run()
+    out[page] = [[e.value for e in at.exception], [e.value for e in at.error]]
+print(json.dumps(out))
+"""
+MINIO_ERROR = "Nie udało się odczytać danych z MinIO: "
+
+
+def _docker_ts(value: str) -> datetime:
+    """A Docker timestamp (RFC 3339, nanoseconds, `Z` or an offset) as a datetime."""
+    m = re.fullmatch(r"(.{19})(?:\.(\d+))?(Z|[+-]\d\d:\d\d)", value)
+    assert m, value
+    frac = (m.group(2) or "0")[:6].ljust(6, "0")
+    return datetime.fromisoformat(f"{m.group(1)}.{frac}{m.group(3).replace('Z', '+00:00')}")
+
+
+@pytest.mark.slow
+def test_dashboard_shows_an_error_while_minio_is_down_and_recovers(
+    stack, gold_ready, dashboard_env
+):
+    """07 §3: "Błąd odczytu (np. restart MinIO) jest pokazywany w miejscu danych, a
+    następne odświeżenie ponawia odczyt." With `minio` stopped: the overview page (host,
+    a reader that already cached the data) and every page inside the dashboard container
+    render without an uncaught exception and show the MinIO read error in place of the
+    data; the container keeps running, healthy, not restarted. After `minio` is started
+    again the next render shows the KPIs with no error (the stack is left healthy)."""
+    at = render("overview")
+    assert problems(at) == [] and at.metric, texts(at)
+    dash0 = stack.inspect("dashboard")
+    minio0 = stack.inspect("minio")["State"]["StartedAt"]
+    stack.run("stop", "minio")
+    try:
+        state = stack.inspect("minio")["State"]
+        assert state["Status"] == "exited", state
+        stopped_at = _docker_ts(state["FinishedAt"])
+        at = render("overview")
+        assert [e.value for e in at.exception] == []
+        errors = [e.value for e in at.error]
+        assert errors and all(e.startswith(MINIO_ERROR) for e in errors), errors
+
+        res = stack.exec("dashboard", "python", "-c", IN_CONTAINER_ERRORS % json.dumps(PAGES))
+        pages = json.loads(res.stdout.strip().splitlines()[-1])
+        bad = {p: v for p, v in pages.items()
+               if v[0] or not v[1] or not all(e.startswith(MINIO_ERROR) for e in v[1])}  # fmt: skip
+        assert bad == {}, bad
+
+        # a healthcheck that ran while MinIO was down passed; same container, no restart
+        def checked_after_stop() -> list | None:
+            log = stack.inspect("dashboard")["State"]["Health"]["Log"]
+            return [h for h in log if _docker_ts(h["Start"]) > stopped_at] or None
+
+        runs = wait_until(checked_after_stop, 60, every=2, desc="a dashboard healthcheck")
+        assert all(h["ExitCode"] == 0 for h in runs), runs
+        dash = stack.inspect("dashboard")
+        assert dash["State"]["StartedAt"] == dash0["State"]["StartedAt"]
+        assert dash["RestartCount"] == dash0["RestartCount"]
+        assert dash["State"]["Health"]["Status"] == "healthy"
+    finally:
+        stack.run("start", "minio")
+        wait_until(lambda: stack.health("minio") == "healthy", 120, every=2,
+                   desc="minio healthy again")  # fmt: skip
+    assert stack.inspect("minio")["State"]["StartedAt"] != minio0
+
+    def recovered():
+        a = render("overview")
+        return a if problems(a) == [] and a.metric else None
+
+    at = wait_until(recovered, 120, every=5, desc="overview shows the KPIs again")
+    assert "Czekam na dane" not in texts(at)
+    stack.wait_healthy(timeout=600)  # spark resumes its writes by itself (08 §12.8)

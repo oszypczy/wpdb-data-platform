@@ -22,12 +22,16 @@ from psycopg import errors
 
 from simulator import events as ev
 from simulator.config import Config
-from simulator.csvio import load_dir
 from simulator.db import Database
 from simulator.engine import Loaded, Simulator
 from simulator.render import Renderer
 from simulator.schema import infer_schemas
 from tests.helpers import clients, olist_mini
+from tests.helpers.simfold import (
+    CATALOG_COUNTS,
+    assert_matches_uninterrupted_run,
+    read_state,
+)
 from tests.helpers.wait import wait_until
 
 pytestmark = pytest.mark.integration
@@ -35,21 +39,6 @@ pytestmark = pytest.mark.integration
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "data" / "olist"
 SIMULATOR_SRC = ROOT / "containers" / "simulator"
-
-STATE_COLUMNS = (
-    "phase",
-    "sim_start",
-    "sim_end",
-    "sim_clock",
-    "cursor_order_id",
-    "cursor_step",
-    "events_applied",
-    "orders_inserted",
-    "rows_inserted",
-    "rows_updated",
-    "rows_deleted",
-    "schema_evolution_at",
-)
 
 # 01 §3 on the real data: the public interface that Debezium captures
 EXPECTED_COLUMNS = {
@@ -144,7 +133,6 @@ EXPECTED_EXTRA_INDEXES = {
     },
     "order_reviews": {"order_reviews_order_id_idx": ["order_id"]},
 }
-CATALOG_COUNTS = {"products": 32951, "sellers": 3095, "product_category_name_translation": 71}
 TRUTH_VIEWS = {
     "v_truth_row_counts",
     "v_truth_orders",
@@ -152,15 +140,13 @@ TRUTH_VIEWS = {
     "v_truth_revenue_by_state",
     "v_truth_payments",
     "v_truth_order_lifecycle",
+    "v_truth_reviews",
+    "v_truth_reviews_by_delivery",
+    "v_truth_payment_installments",
 }
-
-
-def read_state(conn: psycopg.Connection) -> dict:
-    row = conn.execute(
-        f"SELECT {', '.join(STATE_COLUMNS)} FROM sim.sim_state WHERE id = 1"
-    ).fetchone()
-    assert row is not None, "sim.sim_state has no row"
-    return dict(zip(STATE_COLUMNS, row, strict=True))
+# Test probe tables in shop (03 §11: zz_stage2_probe_* of test_debezium, the probe shop's
+# zz_probe_<hex>_* of the session fixture) are not the simulator's tables.
+PROBE_TABLE_PREFIX = "zz_"
 
 
 def state_ready(conn: psycopg.Connection) -> dict | None:
@@ -197,7 +183,8 @@ def test_tables_created_with_detected_types_pks_fks_and_indexes(simulator_runnin
         "WHERE n.nspname = 'shop' AND c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped "
         "ORDER BY c.relname, a.attnum"
     ).fetchall():
-        columns.setdefault(table, []).append((name, typ, not notnull))
+        if not table.startswith(PROBE_TABLE_PREFIX):
+            columns.setdefault(table, []).append((name, typ, not notnull))
     assert columns == EXPECTED_COLUMNS
 
     pks: dict[str, list[str]] = {}
@@ -215,6 +202,8 @@ def test_tables_created_with_detected_types_pks_fks_and_indexes(simulator_runnin
         "WHERE c.connamespace = 'shop'::regnamespace AND c.contype IN ('p', 'f')"
     ).fetchall():
         table = table.removeprefix("shop.")
+        if table.startswith(PROBE_TABLE_PREFIX):
+            continue
         if contype == "p":
             pks[table] = list(cols)
         else:
@@ -233,14 +222,15 @@ def test_tables_created_with_detected_types_pks_fks_and_indexes(simulator_runnin
         "JOIN pg_class t ON t.oid = x.indrelid JOIN pg_class i ON i.oid = x.indexrelid "
         "WHERE t.relnamespace = 'shop'::regnamespace"
     ).fetchall():
-        if not is_pk:
+        if not is_pk and not table.startswith(PROBE_TABLE_PREFIX):
             indexes[table][index] = list(cols)
     assert {t: ix for t, ix in indexes.items() if ix} == EXPECTED_EXTRA_INDEXES
 
     identities = dict(
         pg_reader.execute(
             "SELECT relname, relreplident FROM pg_class "
-            "WHERE relnamespace = 'shop'::regnamespace AND relkind = 'r'"
+            "WHERE relnamespace = 'shop'::regnamespace AND relkind = 'r' "
+            f"AND relname NOT LIKE '{PROBE_TABLE_PREFIX}%'"
         ).fetchall()
     )
     assert identities == {t: "f" for t in EXPECTED_COLUMNS}, identities
@@ -433,72 +423,6 @@ def test_purchase_failing_on_its_last_statement_is_rolled_back_entirely(
 
 
 # --- 01 §8: kill + restart resumes from sim_state without duplicates ---------------------
-def _expected_after(cursor_state: dict) -> ev.Summary:
-    """What an uninterrupted run leaves in the database at this cursor: the preload plus
-    every replay event up to and including the cursor, folded by the pure event model."""
-    tables = load_dir(DATA)
-    ds = ev.Dataset(tables)
-    events = ev.build_events(ds.build_orders(), ds, until=cursor_state["sim_end"])
-    events = ev.with_schema_evolution(events, cursor_state["schema_evolution_at"])
-    preload, replay = ev.split_window(events, cursor_state["sim_start"], cursor_state["sim_end"])
-    cursor = (
-        cursor_state["sim_clock"],
-        cursor_state["cursor_order_id"],
-        cursor_state["cursor_step"],
-    )
-    if cursor_state["phase"] == "preload":
-        applied = [e for e in preload if e.key <= cursor]
-    else:
-        applied = preload + [e for e in replay if e.key <= cursor]
-    return ev.summarize(applied, ds)
-
-
-def _snapshot(pg_reader) -> tuple[dict, dict[str, int], dict[str, tuple]]:
-    """State, row counts and per-status totals read in one REPEATABLE READ snapshot."""
-    with pg_reader.transaction():
-        pg_reader.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-        state = read_state(pg_reader)
-        counts = dict(pg_reader.execute("SELECT * FROM sim.v_truth_row_counts").fetchall())
-        by_status = {
-            r[0]: (r[1], r[2], r[3])
-            for r in pg_reader.execute(
-                "SELECT order_status, orders, items, revenue FROM sim.v_truth_orders"
-            )
-        }
-    return state, counts, by_status
-
-
-def assert_matches_uninterrupted_run(pg_reader) -> dict:
-    state, counts, by_status = _snapshot(pg_reader)
-    expected = _expected_after(state)
-    assert expected.by_status is not None
-    assert state["events_applied"] == expected.events
-    assert (state["rows_inserted"], state["rows_updated"], state["rows_deleted"]) == (
-        expected.inserts,
-        expected.updates,
-        expected.deletes,
-    )
-    assert state["orders_inserted"] == expected.orders
-    assert {t: counts[t] for t in ev.LIFECYCLE_TABLES} == {
-        "customers": expected.customers,
-        "orders": expected.orders,
-        "order_items": expected.order_items,
-        "order_payments": expected.order_payments,
-        "order_reviews": expected.order_reviews,
-    }
-    assert {t: counts[t] for t in CATALOG_COUNTS} == CATALOG_COUNTS
-    if expected.schema_evolved:  # 01 §7: only when SIM_SCHEMA_EVOLUTION_AT is set and passed
-        channels = dict(
-            pg_reader.execute(
-                "SELECT delivery_channel, count(*) FROM shop.orders "
-                "WHERE delivery_channel IS NOT NULL GROUP BY 1"
-            ).fetchall()
-        )
-        assert channels == expected.delivery_channels
-    assert by_status == {s: (t.orders, t.items, t.revenue) for s, t in expected.by_status.items()}
-    return state
-
-
 def test_database_state_equals_the_pure_fold_of_events_up_to_the_cursor(
     simulator_running, pg_reader
 ):

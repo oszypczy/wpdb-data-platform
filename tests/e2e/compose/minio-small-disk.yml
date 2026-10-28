@@ -1,0 +1,16 @@
+# E2E only (tests/e2e/test_minio_disk_full.py, 08 §12.8): MinIO stores its data on a
+# size-limited tmpfs instead of the minio_data volume, so the test can fill "the disk"
+# and free it again without ever touching the Docker VM disk. The test writes a filler
+# file next to the data directory (/mnt/minio/filler), MinIO answers XMinioStorageFull.
+# tmpfs pages count against the container's memory, hence the higher limit (768 MiB of
+# tmpfs + MinIO's own ~0.5 GiB). The minio_data volume stays mounted at /data, unused.
+# Never `restart` minio on this stack: a tmpfs does not survive a container restart.
+services:
+  minio:
+    command: ["server", "/mnt/minio/data", "--console-address", ":9001"]
+    tmpfs:
+      - /mnt/minio:size=768m
+    deploy:
+      resources:
+        limits:
+          memory: 2g

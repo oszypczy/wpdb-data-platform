@@ -8,6 +8,7 @@ nothing but a second way to start the same services.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -40,21 +41,30 @@ class ServiceState:
 
 @dataclass
 class ComposeStack:
+    """`env` overrides compose variable substitution (the shell wins over `.env`, e.g.
+    `SIM_END` of an e2e stack); `files` replaces the default `docker-compose.yml` with a
+    list of compose files (e.g. plus an e2e override). Every command of one stack must
+    use the same values, otherwise `up` sees a changed config and recreates containers."""
+
     root: Path
     project: str = "wpdb"
+    env: dict[str, str] = field(default_factory=dict)
+    files: list[str] = field(default_factory=list)
     startup_seconds: float | None = field(default=None, init=False)
 
     # -- low level -----------------------------------------------------------
     def run(
         self, *args: str, check: bool = True, capture: bool = True
     ) -> subprocess.CompletedProcess:
-        cmd = ["docker", "compose", *args]
+        flags = [x for f in self.files for x in ("-f", f)]
+        cmd = ["docker", "compose", *flags, *args]
         return subprocess.run(
             cmd,
             cwd=self.root,
             check=check,
             text=True,
             capture_output=capture,
+            env={**os.environ, **self.env} if self.env else None,
         )
 
     def docker(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -148,6 +158,20 @@ class ComposeStack:
 
     def kill(self, service: str) -> None:
         self.run("kill", service)
+
+    def inspect(self, service: str) -> dict:
+        """`docker inspect` of the service's container (Id, State with StartedAt/Health)."""
+        return json.loads(self.docker("inspect", self.container_name(service)).stdout)[0]
+
+    def health(self, service: str) -> str:
+        """`healthy`/`unhealthy`/`starting`, or the state (`exited`, …) without a healthcheck
+        result; `missing` when the service has no container."""
+        try:
+            state = self.inspect(service)["State"]
+        except (LookupError, subprocess.CalledProcessError):
+            return "missing"
+        health = (state.get("Health") or {}).get("Status")
+        return health if state.get("Status") == "running" and health else state.get("Status")
 
     def config_ok(self, profiles: list[str] | None = None) -> bool:
         args: list[str] = []
