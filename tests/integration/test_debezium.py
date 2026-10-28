@@ -280,9 +280,10 @@ def test_preload_rows_arrive_as_snapshot_reads_and_the_stream_continues_without_
     # no duplicate at the boundary: a preload row is never re-created by the stream,
     # a row created by the stream was never in the snapshot, nothing is read twice
     assert preload & creates == set(), f"preload rows re-created: {sorted(preload & creates)[:5]}"
-    assert (reads - preload) == set(), (
-        f"snapshot reads of non-preload rows: {sorted(reads - preload)[:5]}"
-    )
+    # the snapshot may also hold orders the replay created between the end of the preload
+    # and the slot's consistent point (the simulator does not wait for the connector; on
+    # a slow CI runner registration takes seconds): those arrive as r instead of c, still
+    # exactly once, so only the preload is required to be read
     assert reads & creates == set(), (
         f"keys both snapshotted and created: {sorted(reads & creates)[:5]}"
     )
@@ -310,7 +311,7 @@ def test_preload_rows_arrive_as_snapshot_reads_and_the_stream_continues_without_
         f"{len(not_read)} preload orders without exactly one op=r: {not_read[:5]}"
     )
     if intact == set(orders_topic.end.high):
-        assert reads == preload
+        assert preload <= reads
     # the snapshot phase precedes the stream in every partition, with the right flags
     for partition in {r.partition for r in orders_topic}:
         ops = [r for r in orders_topic if r.partition == partition]
